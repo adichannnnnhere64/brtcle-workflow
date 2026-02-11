@@ -32,7 +32,7 @@ class PaymentRequest extends Model
         'paid_at' => 'datetime',
     ];
 
-    protected string $workflowName = 'payment_request';
+    public string $workflowName = 'payment_request';
     protected string $stateColumn = 'status';
 
     public function user()

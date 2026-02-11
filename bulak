@@ -1,0 +1,2365 @@
+src/Contracts/WorkflowInterface.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Contracts;
+
+use Illuminate\Database\Eloquent\Model;
+
+interface WorkflowInterface
+{
+    /**
+     * Get all available transitions for the current state
+     */
+    public function getAvailableTransitions(Model $model): array;
+
+    /**
+     * Apply a transition to the model
+     */
+    public function apply(
+        Model $model,
+        string $transition,
+        array $context = []
+    ): WorkflowTransitionInterface;
+
+    /**
+     * Check if a transition can be applied
+     */
+    public function can(
+        Model $model,
+        string $transition,
+        array $context = []
+    ): bool;
+
+    /**
+     * Get the current state
+     */
+    public function getState(Model $model): string;
+
+    /**
+     * Get the state history
+     */
+    public function getHistory(Model $model): array;
+
+    /**
+     * Get workflow definition
+     */
+    public function getDefinition(): array;
+}
+
+
+src/Contracts/WorkflowStateInterface.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Contracts;
+
+interface WorkflowStateInterface
+{
+    /**
+     * Get state identifier
+     */
+    public function value(): string;
+
+    /**
+     * Get human-readable label
+     */
+    public function label(): string;
+
+    /**
+     * Check if state is final
+     */
+    public function isFinal(): bool;
+
+    /**
+     * Check if state is initial
+     */
+    public function isInitial(): bool;
+
+    /**
+     * Get allowed transitions from this state
+     */
+    public function allowedTransitions(): array;
+}
+
+
+src/Contracts/WorkflowTransitionInterface.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Contracts;
+
+use Illuminate\Database\Eloquent\Model;
+
+interface WorkflowTransitionInterface
+{
+    public function getFromState(): string;
+    public function getToState(): string;
+    public function getTransitionName(): string;
+    public function getContext(): array;
+    public function getModel(): Model;
+    public function getPerformedBy(): ?Model;
+    public function getPerformedAt(): \DateTimeInterface;
+    public function getMetadata(): array;
+}
+
+
+src/Enums/WorkflowGuard.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Enums;
+
+enum WorkflowGuard: string
+{
+    case CAN_SUBMIT = 'workflow.can_submit';
+    case CAN_APPROVE = 'workflow.can_approve';
+    case CAN_REJECT = 'workflow.can_reject';
+    case CAN_REQUEST_REVISION = 'workflow.can_request_revision';
+    case CAN_PROCESS_PAYMENT = 'workflow.can_process_payment';
+    case CAN_VIEW = 'workflow.can_view';
+    case CAN_EDIT = 'workflow.can_edit';
+
+    public function description(): string
+    {
+        return match ($this) {
+            self::CAN_SUBMIT => 'Can submit for review',
+            self::CAN_APPROVE => 'Can approve requests',
+            self::CAN_REJECT => 'Can reject requests',
+            self::CAN_REQUEST_REVISION => 'Can request revisions',
+            self::CAN_PROCESS_PAYMENT => 'Can process payments',
+            self::CAN_VIEW => 'Can view',
+            self::CAN_EDIT => 'Can edit',
+        };
+    }
+}
+
+
+src/Events/WorkflowTransitioned.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Events;
+
+use Illuminate\Broadcasting\InteractsWithSockets;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Foundation\Events\Dispatchable;
+use Illuminate\Queue\SerializesModels;
+
+class WorkflowTransitioned
+{
+    use Dispatchable, InteractsWithSockets, SerializesModels;
+
+    public function __construct(
+        public Model $model,
+        public string $transition,
+        public string $fromState,
+        public string $toState,
+        public array $context = []
+    ) {}
+}
+
+
+src/Listeners/LogWorkFlowTransaction.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Listeners;
+
+use Adichan\WorkflowEngine\Events\WorkflowTransitioned;
+use Illuminate\Support\Facades\Log;
+
+class LogWorkflowTransition
+{
+    public function handle(WorkflowTransitioned $event): void
+    {
+        Log::info('Workflow transition', [
+            'model' => get_class($event->model),
+            'model_id' => $event->model->id,
+            'transition' => $event->transition,
+            'from_state' => $event->fromState,
+            'to_state' => $event->toState,
+            'performed_by' => auth()->id(),
+            'context' => $event->context,
+        ]);
+    }
+}
+
+
+src/Models/Workflow.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
+
+class Workflow extends Model
+{
+    protected $fillable = [
+        'name',
+        'definition',
+        'version',
+        'is_active',
+    ];
+
+    protected $casts = [
+        'definition' => 'array',
+        'is_active' => 'boolean',
+        'version' => 'integer',
+    ];
+
+    public function transitions()
+    {
+        return $this->hasMany(WorkflowTransition::class, 'workflow_type', 'name');
+    }
+}
+
+
+src/Models/WorkflowTransition.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Adichan\WorkflowEngine\Contracts\WorkflowTransitionInterface;
+
+class WorkflowTransition extends Model implements WorkflowTransitionInterface
+{
+    protected $fillable = [
+        'workflow_type',
+        'model_type',
+        'model_id',
+        'transition',
+        'from_state',
+        'to_state',
+        'context',
+        'performed_by',
+        'metadata',
+    ];
+
+    protected $casts = [
+        'context' => 'array',
+        'metadata' => 'array',
+        'performed_at' => 'datetime',
+    ];
+
+    public function model(): MorphTo
+    {
+        return $this->morphTo();
+    }
+
+    public function performer()
+    {
+        return $this->belongsTo(config('auth.providers.users.model'), 'performed_by');
+    }
+
+    // Interface implementation
+    public function getFromState(): string
+    {
+        return $this->from_state;
+    }
+
+    public function getToState(): string
+    {
+        return $this->to_state;
+    }
+
+    public function getTransitionName(): string
+    {
+        return $this->transition;
+    }
+
+    public function getContext(): array
+    {
+        return $this->context ?? [];
+    }
+
+    public function getModel(): Model
+    {
+        return $this->model;
+    }
+
+    public function getPerformedBy(): ?Model
+    {
+        return $this->performer;
+    }
+
+    public function getPerformedAt(): \DateTimeInterface
+    {
+        return $this->performed_at;
+    }
+
+    public function getMetadata(): array
+    {
+        return $this->metadata ?? [];
+    }
+}
+
+
+src/States/AbstractWorkflowState.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\States;
+
+use Adichan\WorkflowEngine\Contracts\WorkflowStateInterface;
+use Adichan\WorkflowEngine\Enums\WorkflowGuard;
+
+abstract class AbstractWorkflowState implements WorkflowStateInterface
+{
+    protected array $transitions = [];
+    protected array $guards = [];
+
+    public function __construct(
+        protected readonly string $state,
+        protected readonly string $label,
+        protected readonly bool $isInitial = false,
+        protected readonly bool $isFinal = false
+    ) {}
+
+    public function value(): string
+    {
+        return $this->state;
+    }
+
+    public function label(): string
+    {
+        return $this->label;
+    }
+
+    public function isFinal(): bool
+    {
+        return $this->isFinal;
+    }
+
+    public function isInitial(): bool
+    {
+        return $this->isInitial;
+    }
+
+    public function allowedTransitions(): array
+    {
+        return $this->transitions;
+    }
+
+    public function addTransition(
+        string $toState,
+        string $transitionName,
+        WorkflowGuard $guard,
+        ?callable $validator = null
+    ): void {
+        $this->transitions[$transitionName] = [
+            'to' => $toState,
+            'guard' => $guard,
+            'validator' => $validator,
+        ];
+    }
+
+    public function getGuard(string $transitionName): ?WorkflowGuard
+    {
+        return $this->transitions[$transitionName]['guard'] ?? null;
+    }
+
+    public function validateTransition(string $transitionName, array $context = []): bool
+    {
+        $validator = $this->transitions[$transitionName]['validator'] ?? null;
+
+        if ($validator && is_callable($validator)) {
+            return $validator($context);
+        }
+
+        return true;
+    }
+}
+
+
+src/States/StateMachine.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\States;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\DB;
+use Adichan\WorkflowEngine\Contracts\WorkflowInterface;
+use Adichan\WorkflowEngine\Contracts\WorkflowTransitionInterface;
+use Adichan\WorkflowEngine\Enums\WorkflowGuard;
+use Adichan\WorkflowEngine\Models\WorkflowTransition;
+use Adichan\WorkflowEngine\Events\WorkflowTransitioned;
+
+class StateMachine implements WorkflowInterface
+{
+    private array $states = [];
+
+    public function __construct(
+        protected string $workflowName,
+        protected array $definition
+    ) {
+        $this->initializeStates();
+    }
+
+    private function initializeStates(): void
+    {
+        // FIX: Check if states key exists
+        if (!isset($this->definition['states'])) {
+            throw new \InvalidArgumentException("Workflow definition must contain 'states' key");
+        }
+
+        foreach ($this->definition['states'] as $stateConfig) {
+            $state = new class(
+                $stateConfig['value'],
+                $stateConfig['label'],
+                $stateConfig['is_initial'] ?? false,
+                $stateConfig['is_final'] ?? false
+            ) extends AbstractWorkflowState {};
+
+            $this->states[$stateConfig['value']] = $state;
+        }
+
+        // FIX: Check if transitions key exists
+        if (!isset($this->definition['transitions'])) {
+            throw new \InvalidArgumentException("Workflow definition must contain 'transitions' key");
+        }
+
+        foreach ($this->definition['transitions'] as $transition) {
+            $fromState = $this->states[$transition['from']] ?? null;
+            
+            if (!$fromState) {
+                throw new \InvalidArgumentException(
+                    "Transition '{$transition['name']}' references undefined state: {$transition['from']}"
+                );
+            }
+            
+            $fromState->addTransition(
+                $transition['to'],
+                $transition['name'],
+                WorkflowGuard::from($transition['guard']),
+                $transition['validator'] ?? null
+            );
+        }
+    }
+
+    public function getAvailableTransitions(Model $model): array
+    {
+        $stateColumn = $this->definition['state_column'] ?? 'status';
+        $currentStateValue = $model->{$stateColumn} ?? 'draft';
+        $currentState = $this->states[$currentStateValue] ?? null;
+
+        if (!$currentState) {
+            return [];
+        }
+
+        $available = [];
+
+        foreach ($currentState->allowedTransitions() as $transitionName => $config) {
+            if ($this->can($model, $transitionName)) {
+                $available[$transitionName] = [
+                    'to' => $config['to'],
+                    'guard' => $config['guard'],
+                ];
+            }
+        }
+
+        return $available;
+    }
+
+    public function apply(
+        Model $model,
+        string $transition,
+        array $context = []
+    ): WorkflowTransitionInterface {
+        if (!$this->can($model, $transition, $context)) {
+            throw new \DomainException(
+                "Transition '{$transition}' is not allowed from current state"
+            );
+        }
+
+        $stateColumn = $this->definition['state_column'] ?? 'status';
+        $currentState = $model->{$stateColumn};
+        $state = $this->states[$currentState] ?? null;
+
+        if (!$state) {
+            throw new \DomainException("Invalid current state: {$currentState}");
+        }
+
+        $config = $state->allowedTransitions()[$transition] ?? null;
+
+        if (!$config) {
+            throw new \DomainException("Transition '{$transition}' not defined");
+        }
+
+        // FIX: Execute BEFORE hooks BEFORE checking if transition can be applied
+        $this->executeBeforeHooks($transition, $model, $currentState, $config['to'], $context);
+
+        return DB::transaction(function () use ($model, $transition, $config, $currentState, $context, $stateColumn) {
+            $previousState = $currentState;
+            $newState = $config['to'];
+
+            // Update model state
+            $model->{$stateColumn} = $newState;
+            $model->save();
+
+            // Create transition record
+            $transitionRecord = WorkflowTransition::create([
+                'workflow_type' => $this->workflowName,
+                'model_type' => get_class($model),
+                'model_id' => $model->id,
+                'transition' => $transition,
+                'from_state' => $previousState,
+                'to_state' => $newState,
+                'context' => $context,
+                'performed_by' => auth()->id(),
+                'metadata' => $context['metadata'] ?? [],
+                'performed_at' => now(),
+            ]);
+
+            // Execute AFTER hooks
+            $this->executeAfterHooks($transition, $model, $previousState, $newState, $context);
+
+            // Dispatch event
+            event(new WorkflowTransitioned(
+                $model,
+                $transition,
+                $previousState,
+                $newState,
+                $context
+            ));
+
+            return $transitionRecord;
+        });
+    }
+
+	// src/States/StateMachine.php (update the can() method)
+public function can(
+    Model $model,
+    string $transition,
+    array $context = []
+): bool {
+    $stateColumn = $this->definition['state_column'] ?? 'status';
+    $currentState = $model->{$stateColumn};
+    $state = $this->states[$currentState] ?? null;
+
+    if (!$state) {
+        return false;
+    }
+
+    $config = $state->allowedTransitions()[$transition] ?? null;
+
+    if (!$config) {
+        return false;
+    }
+
+    // Check guard
+    $guardValue = $config['guard'] instanceof WorkflowGuard 
+        ? $config['guard']->value 
+        : $config['guard'];
+        
+    if (!Gate::allows($guardValue, $model)) {
+        return false;
+    }
+
+    // Check validator
+    if (isset($config['validator']) && is_callable($config['validator'])) {
+        try {
+            if (!$config['validator']($context)) {
+                return false;
+            }
+        } catch (\Exception $e) {
+            return false;
+        }
+    }
+
+    // Check custom conditions from definition
+    if (isset($this->definition['conditions'][$transition])) {
+        $condition = $this->definition['conditions'][$transition];
+        if (is_callable($condition)) {
+            try {
+                if (!$condition($model, $context)) {
+                    return false;
+                }
+            } catch (\Exception $e) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+
+    public function getState(Model $model): string
+    {
+        $stateColumn = $this->definition['state_column'] ?? 'status';
+        return $model->{$stateColumn};
+    }
+
+    public function getHistory(Model $model): array
+    {
+        return WorkflowTransition::where('model_type', get_class($model))
+            ->where('model_id', $model->id)
+            ->where('workflow_type', $this->workflowName)
+            ->orderBy('created_at', 'asc')
+            ->get()
+            ->toArray();
+    }
+
+    public function getDefinition(): array
+    {
+        return $this->definition;
+    }
+
+    private function executeBeforeHooks(
+        string $transition,
+        Model $model,
+        string $from,
+        string $to,
+        array $context
+    ): void {
+        // Execute before hooks
+        if (isset($this->definition['hooks']['before'][$transition])) {
+            $this->definition['hooks']['before'][$transition]($model, $from, $to, $context);
+        }
+    }
+
+    private function executeAfterHooks(
+        string $transition,
+        Model $model,
+        string $from,
+        string $to,
+        array $context
+    ): void {
+        // Execute after hooks
+        if (isset($this->definition['hooks']['after'][$transition])) {
+            $this->definition['hooks']['after'][$transition]($model, $from, $to, $context);
+        }
+    }
+}
+
+
+src/Traits/HasWorkflow.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Traits;
+
+use Adichan\WorkflowEngine\States\StateMachine;
+
+trait HasWorkflow
+{
+    private ?StateMachine $workflow = null;
+
+    public function workflow(): StateMachine
+    {
+        if (!$this->workflow) {
+            $workflowName = $this->getWorkflowName();
+            
+            // FIX: Get config from the correct location
+            $workflows = config('workflow.workflows', []);
+            $definition = $workflows[$workflowName] ?? null;
+
+            if (!$definition) {
+                // Fallback to old config path for backward compatibility
+                $definition = config("workflows.{$workflowName}");
+                
+                if (!$definition) {
+                    throw new \RuntimeException("Workflow '{$workflowName}' not defined. Check your workflow configuration.");
+                }
+            }
+
+            $this->workflow = new StateMachine($workflowName, $definition);
+        }
+
+        return $this->workflow;
+    }
+
+    public function getWorkflowName(): string
+    {
+        return property_exists($this, 'workflowName')
+            ? $this->workflowName
+            : class_basename($this);
+    }
+
+    public function getStateColumn(): string
+    {
+        return property_exists($this, 'stateColumn')
+            ? $this->stateColumn
+            : 'state';
+    }
+
+    public function availableTransitions(): array
+    {
+        return $this->workflow()->getAvailableTransitions($this);
+    }
+
+    public function canTransition(string $transition, array $context = []): bool
+    {
+        return $this->workflow()->can($this, $transition, $context);
+    }
+
+    public function transition(string $transition, array $context = [])
+    {
+        return $this->workflow()->apply($this, $transition, $context);
+    }
+
+    public function transitionHistory()
+    {
+        return $this->workflow()->getHistory($this);
+    }
+}
+
+
+src/Workflow.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine;
+
+use Illuminate\Database\Eloquent\Model;
+use Adichan\WorkflowEngine\Contracts\WorkflowInterface;
+use Adichan\WorkflowEngine\States\StateMachine;
+
+/**
+ * Base workflow class for concrete workflow implementations
+ */
+abstract class Workflow implements WorkflowInterface
+{
+    protected StateMachine $stateMachine;
+
+    public function __construct()
+    {
+        $this->stateMachine = new StateMachine(
+            $this->getName(),
+            $this->getDefinition()
+        );
+    }
+
+    /**
+     * Get the workflow name
+     */
+    abstract public function getName(): string;
+
+    /**
+     * Get the workflow definition
+     */
+    abstract public function getDefinition(): array;
+
+    /**
+     * Get all available transitions for the current state
+     */
+    public function getAvailableTransitions(Model $model): array
+    {
+        return $this->stateMachine->getAvailableTransitions($model);
+    }
+
+    /**
+     * Apply a transition to the model
+     */
+    public function apply(
+        Model $model,
+        string $transition,
+        array $context = []
+    ): Contracts\WorkflowTransitionInterface {
+        return $this->stateMachine->apply($model, $transition, $context);
+    }
+
+    /**
+     * Check if a transition can be applied
+     */
+    public function can(
+        Model $model,
+        string $transition,
+        array $context = []
+    ): bool {
+        return $this->stateMachine->can($model, $transition, $context);
+    }
+
+    /**
+     * Get the current state
+     */
+    public function getState(Model $model): string
+    {
+        return $this->stateMachine->getState($model);
+    }
+
+    /**
+     * Get the state history
+     */
+    public function getHistory(Model $model): array
+    {
+        return $this->stateMachine->getHistory($model);
+    }
+}
+
+
+src/WorkflowServiceProvider.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine;
+
+use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Facades\Gate;
+
+class WorkflowServiceProvider extends ServiceProvider
+{
+    public function boot(): void
+    {
+        $this->publishes([
+            __DIR__.'/../config/workflow.php' => config_path('workflow.php'),
+        ], 'workflow-config');
+
+        $this->publishes([
+            __DIR__.'/../database/migrations' => database_path('migrations'),
+        ], 'workflow-migrations');
+
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+
+        $this->registerGates();
+    }
+
+    public function register(): void
+    {
+        $this->mergeConfigFrom(
+            __DIR__.'/../config/workflow.php',
+            'workflow'
+        );
+    }
+
+    protected function registerGates(): void
+    {
+        // Only register gates if they haven't been registered already
+        // This allows users to override them in their own AuthServiceProvider
+        
+        if (!Gate::has('workflow.can_submit')) {
+            Gate::define('workflow.can_submit', function ($user) {
+                $allowedRoles = config('workflow.guards.workflow.can_submit', ['employee']);
+                return in_array($user->role, $allowedRoles);
+            });
+        }
+
+        if (!Gate::has('workflow.can_approve')) {
+            Gate::define('workflow.can_approve', function ($user) {
+                $allowedRoles = config('workflow.guards.workflow.can_approve', ['reviewer', 'manager']);
+                return in_array($user->role, $allowedRoles);
+            });
+        }
+
+        if (!Gate::has('workflow.can_reject')) {
+            Gate::define('workflow.can_reject', function ($user) {
+                $allowedRoles = config('workflow.guards.workflow.can_reject', ['reviewer', 'manager']);
+                return in_array($user->role, $allowedRoles);
+            });
+        }
+
+        if (!Gate::has('workflow.can_request_revision')) {
+            Gate::define('workflow.can_request_revision', function ($user) {
+                $allowedRoles = config('workflow.guards.workflow.can_request_revision', ['reviewer', 'manager']);
+                return in_array($user->role, $allowedRoles);
+            });
+        }
+
+        if (!Gate::has('workflow.can_process_payment')) {
+            Gate::define('workflow.can_process_payment', function ($user) {
+                $allowedRoles = config('workflow.guards.workflow.can_process_payment', ['finance']);
+                return in_array($user->role, $allowedRoles);
+            });
+        }
+
+        if (!Gate::has('workflow.can_view')) {
+            Gate::define('workflow.can_view', function ($user, $model) {
+                // Default implementation - can be overridden
+                return $user->id === $model->user_id ||
+                       in_array($user->role, ['reviewer', 'finance', 'manager']);
+            });
+        }
+
+        if (!Gate::has('workflow.can_edit')) {
+            Gate::define('workflow.can_edit', function ($user, $model) {
+                // Default implementation - can be overridden
+                return $user->id === $model->user_id && $model->status === 'draft';
+            });
+        }
+    }
+}
+
+
+src/Workflows/PaymentRequestWorkflow.php
+<?php
+
+declare(strict_types=1);
+
+namespace Adichan\WorkflowEngine\Workflows;
+
+use Adichan\WorkflowEngine\Workflow;
+use Adichan\WorkflowEngine\Enums\WorkflowGuard;
+use Illuminate\Database\Eloquent\Model;
+
+class PaymentRequestWorkflow extends Workflow
+{
+    public function getName(): string
+    {
+        return 'payment_request';
+    }
+
+    public function getDefinition(): array
+    {
+        return [
+            'state_column' => 'status',
+            'states' => [
+                [
+                    'value' => 'draft',
+                    'label' => 'Draft',
+                    'is_initial' => true,
+                    'is_final' => false,
+                ],
+                [
+                    'value' => 'under_review',
+                    'label' => 'Under Review',
+                    'is_initial' => false,
+                    'is_final' => false,
+                ],
+                [
+                    'value' => 'approved',
+                    'label' => 'Approved',
+                    'is_initial' => false,
+                    'is_final' => false,
+                ],
+                [
+                    'value' => 'rejected',
+                    'label' => 'Rejected',
+                    'is_initial' => false,
+                    'is_final' => true,
+                ],
+                [
+                    'value' => 'completed',
+                    'label' => 'Completed',
+                    'is_initial' => false,
+                    'is_final' => true,
+                ],
+            ],
+            'transitions' => [
+                [
+                    'name' => 'submit',
+                    'from' => 'draft',
+                    'to' => 'under_review',
+                    'guard' => WorkflowGuard::CAN_SUBMIT->value,
+                    'validator' => fn(array $context) => isset($context['attachments']) && count($context['attachments']) > 0,
+                ],
+                [
+                    'name' => 'approve',
+                    'from' => 'under_review',
+                    'to' => 'approved',
+                    'guard' => WorkflowGuard::CAN_APPROVE->value,
+                ],
+                [
+                    'name' => 'reject',
+                    'from' => 'under_review',
+                    'to' => 'rejected',
+                    'guard' => WorkflowGuard::CAN_REJECT->value,
+                    'validator' => fn(array $context) => isset($context['reason']) && !empty($context['reason']),
+                ],
+                [
+                    'name' => 'request_revision',
+                    'from' => 'under_review',
+                    'to' => 'draft',
+                    'guard' => WorkflowGuard::CAN_REQUEST_REVISION->value,
+                    'validator' => fn(array $context) => isset($context['remarks']) && !empty($context['remarks']),
+                ],
+                [
+                    'name' => 'process_payment',
+                    'from' => 'approved',
+                    'to' => 'completed',
+                    'guard' => WorkflowGuard::CAN_PROCESS_PAYMENT->value,
+                    'validator' => fn(array $context) => isset($context['payment_proof']) && isset($context['processed_at']),
+                ],
+            ],
+            'conditions' => [
+                // Custom business logic
+                'approve' => fn(Model $model) => $model->amount <= 100000,
+                'process_payment' => fn(Model $model) => $model->payment_due_date > now(),
+            ],
+            'hooks' => [
+                'before' => [
+                    'submit' => function (Model $model, string $from, string $to, array $context) {
+                        // Validate required fields before submission
+                        if (empty($model->description)) {
+                            throw new \DomainException('Description is required');
+                        }
+                    },
+                ],
+                'after' => [
+                    'approve' => function (Model $model, string $from, string $to, array $context) {
+                        // Auto-assign to finance team if amount > 5000
+                        if ($model->amount > 5000) {
+                            $model->assigned_to = 'finance_team';
+                            $model->save();
+                        }
+                    },
+                    'process_payment' => function (Model $model, string $from, string $to, array $context) {
+                        // Mark as paid in accounting system
+                        $model->update([
+                            'paid_at' => now(),
+                            'payment_confirmation' => $context['payment_proof'] ?? null,
+                        ]);
+                    },
+                ],
+            ],
+        ];
+    }
+}
+
+
+src/config/logger.php
+<?php
+
+return [
+    'mode' => env('LOGGER_MODE', 'both'),
+    'channel' => env('LOGGER_CHANNEL', 'daily'),
+    'table' => 'system_logs',
+];
+
+
+src/database/migrations/2025_12_10_000000_create_workflow_transitions_table.php
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('workflow_transitions', function (Blueprint $table) {
+            $table->id();
+            $table->string('workflow_type');
+            $table->string('model_type');
+            $table->unsignedBigInteger('model_id');
+            $table->string('transition');
+            $table->string('from_state');
+            $table->string('to_state');
+            $table->json('context')->nullable();
+            $table->unsignedBigInteger('performed_by')->nullable();
+            $table->json('metadata')->nullable();
+            $table->timestamps();
+            
+            $table->index(['model_type', 'model_id']);
+            $table->index('workflow_type');
+            $table->index('performed_by');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('workflow_transitions');
+    }
+};
+
+
+src/database/migrations/2025_12_11_000000_create_workflows_table.php
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('workflows', function (Blueprint $table) {
+            $table->id();
+            $table->string('name')->unique();
+            $table->json('definition');
+            $table->integer('version')->default(1);
+            $table->boolean('is_active')->default(true);
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('workflows');
+    }
+};
+
+
+config/workflow.php
+<?php
+
+return [
+    /*
+    |--------------------------------------------------------------------------
+    | Default Workflow
+    |--------------------------------------------------------------------------
+    |
+    | The default workflow to use when none is specified
+    |
+    */
+    'default_workflow' => env('WORKFLOW_DEFAULT', 'payment_request'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Workflow Definitions
+    |--------------------------------------------------------------------------
+    |
+    | Define all available workflows in your application
+    |
+    */
+    'workflows' => [
+        'payment_request' => [
+            'state_column' => 'status',
+            'states' => [
+                ['value' => 'draft', 'label' => 'Draft', 'is_initial' => true],
+                ['value' => 'under_review', 'label' => 'Under Review'],
+                ['value' => 'approved', 'label' => 'Approved'],
+                ['value' => 'rejected', 'label' => 'Rejected', 'is_final' => true],
+                ['value' => 'completed', 'label' => 'Completed', 'is_final' => true],
+            ],
+            'transitions' => [
+                [
+                    'name' => 'submit',
+                    'from' => 'draft',
+                    'to' => 'under_review',
+                    'guard' => 'workflow.can_submit',
+                ],
+                [
+                    'name' => 'approve',
+                    'from' => 'under_review',
+                    'to' => 'approved',
+                    'guard' => 'workflow.can_approve',
+                ],
+                [
+                    'name' => 'reject',
+                    'from' => 'under_review',
+                    'to' => 'rejected',
+                    'guard' => 'workflow.can_reject',
+                ],
+                [
+                    'name' => 'request_revision',
+                    'from' => 'under_review',
+                    'to' => 'draft',
+                    'guard' => 'workflow.can_request_revision',
+                ],
+                [
+                    'name' => 'process_payment',
+                    'from' => 'approved',
+                    'to' => 'completed',
+                    'guard' => 'workflow.can_process_payment',
+                ],
+            ],
+        ],
+
+        'leave_request' => [
+            'state_column' => 'status',
+            'states' => [
+                ['value' => 'draft', 'label' => 'Draft', 'is_initial' => true],
+                ['value' => 'pending', 'label' => 'Pending Approval'],
+                ['value' => 'approved', 'label' => 'Approved', 'is_final' => true],
+                ['value' => 'rejected', 'label' => 'Rejected', 'is_final' => true],
+                ['value' => 'cancelled', 'label' => 'Cancelled', 'is_final' => true],
+            ],
+            'transitions' => [
+                [
+                    'name' => 'submit',
+                    'from' => 'draft',
+                    'to' => 'pending',
+                    'guard' => 'workflow.can_submit',
+                ],
+                [
+                    'name' => 'approve',
+                    'from' => 'pending',
+                    'to' => 'approved',
+                    'guard' => 'workflow.can_approve',
+                ],
+                [
+                    'name' => 'reject',
+                    'from' => 'pending',
+                    'to' => 'rejected',
+                    'guard' => 'workflow.can_reject',
+                ],
+                [
+                    'name' => 'cancel',
+                    'from' => 'pending',
+                    'to' => 'cancelled',
+                    'guard' => 'workflow.cancel_request',
+                ],
+            ],
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Default Guards
+    |--------------------------------------------------------------------------
+    |
+    | Default gate definitions for workflow transitions
+    |
+    */
+    'guards' => [
+        'workflow.can_submit' => ['employee'],
+        'workflow.can_approve' => ['reviewer', 'manager', 'director'],
+        'workflow.can_reject' => ['reviewer', 'manager', 'director'],
+        'workflow.can_request_revision' => ['reviewer', 'manager'],
+        'workflow.can_process_payment' => ['finance'],
+        'workflow.cancel_request' => ['employee', 'manager'],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Event Listeners
+    |--------------------------------------------------------------------------
+    |
+    | Register workflow event listeners
+    |
+    */
+    'listeners' => [
+        \Adichan\WorkflowEngine\Events\WorkflowTransitioned::class => [
+            \Adichan\WorkflowEngine\Listeners\LogWorkflowTransition::class,
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | History Settings
+    |--------------------------------------------------------------------------
+    |
+    | Configure workflow history/audit trail
+    |
+    */
+    'history' => [
+        'enabled' => true,
+        'table' => 'workflow_transitions',
+        'keep_for_days' => 365,
+    ],
+];
+
+
+composer.json
+{
+    "name": "adichan/workflows",
+    "description": "For Workflow",
+    "keywords": [
+        "adichan",
+        "transaction"
+    ],
+    "homepage": "https://github.com/adichan/product",
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "Adrian Radores",
+            "email": "mobistyle35@gmail.com",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.4|^8.3",
+        "illuminate/support": "^12.0",
+	"pestphp/pest": "^4.1.5"
+
+    },
+    "require-dev": {
+        "orchestra/testbench": "^10.8.0",
+	"driftingly/rector-laravel": "^2.1.3",
+        "fakerphp/faker": "^1.24.1",
+        "laravel/tinker": ">=2.10.2",
+        "larastan/larastan": "^3.8.0",
+        "laravel/boost": "^1.8.3",
+        "laravel/pail": "^1.2.4",
+        "laravel/pint": "^1.26.0",
+        "mockery/mockery": "^1.6.12",
+        "nunomaduro/collision": "^8.8.3",
+        "pestphp/pest": "^4.1.5",
+        "pestphp/pest-plugin-browser": "^4.1.1",
+        "pestphp/pest-plugin-laravel": "^4.0.0",
+        "pestphp/pest-plugin-type-coverage": "^4.0.3",
+        "rector/rector": "^2.2.8"
+    },
+    "autoload": {
+        "psr-4": {
+            "Adichan\\WorkflowEngine\\": "src",
+            "Database\\Factories\\": "src/database/factories/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Adichan\\WorkflowEngine\\Tests\\": "tests"
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/phpunit",
+        "test-coverage": "vendor/bin/phpunit --coverage-html coverage"
+
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Adichan\\WorkflowEngine\\WorkflowServiceProvider"
+            ],
+	    "factories": "database/factories"
+        }
+    }
+}
+
+
+tests/Feature/IntegrationTest.php
+<?php
+
+use Adichan\WorkflowEngine\Tests\TestCase;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\User;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\PaymentRequest;
+use Illuminate\Support\Facades\Gate;
+
+/* uses(TestCase::class); */
+
+beforeEach(function () {
+    // Setup gates for testing
+    Gate::define('workflow.can_submit', function ($user) {
+        return $user->hasRole('employee');
+    });
+
+    Gate::define('workflow.can_approve', function ($user) {
+        return $user->hasRole('reviewer');
+    });
+
+    Gate::define('workflow.can_reject', function ($user) {
+        return $user->hasRole('reviewer');
+    });
+
+    Gate::define('workflow.can_request_revision', function ($user) {
+        return $user->hasRole('reviewer');
+    });
+
+    Gate::define('workflow.can_process_payment', function ($user) {
+        return $user->hasRole('finance');
+    });
+});
+
+test('full integration with mock models', function () {
+    $employee = User::factory()->employee()->create();
+    $reviewer = User::factory()->reviewer()->create();
+    
+    // Create payment request with description (required by hook)
+    $paymentRequest = PaymentRequest::factory()->draft()->create([
+        'user_id' => $employee->id,
+        'description' => 'Test payment request',
+    ]);
+    
+    // Employee can submit
+    $this->actingAs($employee);
+    expect($paymentRequest->canTransition('submit', [
+        'attachments' => ['file.pdf']
+    ]))->toBeTrue();
+    
+    // Submit the request
+    $transition = $paymentRequest->transition('submit', [
+        'attachments' => ['invoice.pdf'],
+    ]);
+    
+    expect($paymentRequest->refresh()->status)->toBe('under_review');
+    
+    // Reviewer can approve
+    $this->actingAs($reviewer);
+    $paymentRequest->refresh();
+    
+    expect($paymentRequest->canTransition('approve'))->toBeTrue();
+    
+    // Approve the request
+    $paymentRequest->transition('approve', [
+        'approved_at' => now(),
+        'remarks' => 'Looks good',
+    ]);
+    
+    expect($paymentRequest->refresh()->status)->toBe('approved');
+    
+    // Verify history
+    $history = $paymentRequest->transitionHistory();
+    expect($history)->toHaveCount(2)
+        ->and($history[0]['transition'])->toBe('submit')
+        ->and($history[1]['transition'])->toBe('approve');
+});
+
+
+tests/Feature/PaymentRequestWorkflowTest.php
+<?php
+
+use Adichan\WorkflowEngine\States\StateMachine;
+use Adichan\WorkflowEngine\Tests\TestCase;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\PaymentRequest;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\User;
+use Illuminate\Support\Facades\Gate;
+
+beforeEach(function () {
+    $this->employee = User::factory()->create(['role' => 'employee']);
+    $this->reviewer = User::factory()->create(['role' => 'reviewer']);
+    $this->finance = User::factory()->create(['role' => 'finance']);
+    
+    // Setup gates
+    Gate::define('workflow.can_submit', fn($user) => $user->hasRole('employee'));
+    Gate::define('workflow.can_approve', fn($user) => $user->hasRole('reviewer'));
+    Gate::define('workflow.can_reject', fn($user) => $user->hasRole('reviewer'));
+    Gate::define('workflow.can_request_revision', fn($user) => $user->hasRole('reviewer'));
+    Gate::define('workflow.can_process_payment', fn($user) => $user->hasRole('finance'));
+});
+
+test('complete payment request workflow', function () {
+    // Step 1: Employee creates and submits request
+    $this->actingAs($this->employee);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->employee->id,
+        'status' => 'draft',
+        'description' => 'Test payment request', // Required by hook
+    ]);
+    
+    // Submit with attachments
+    $transition = $request->transition('submit', [
+        'attachments' => ['invoice.pdf', 'receipt.jpg'],
+        'metadata' => ['submitted_at' => now()],
+    ]);
+    
+    expect($request->refresh()->status)->toBe('under_review');
+    
+    // Step 2: Reviewer requests revision
+    $this->actingAs($this->reviewer);
+    $request->refresh();
+    
+    $transition = $request->transition('request_revision', [
+        'remarks' => 'Please provide proper invoice',
+        'metadata' => ['requested_by' => $this->reviewer->id],
+    ]);
+    
+    expect($request->refresh()->status)->toBe('draft')
+        ->and($transition->getContext())->toHaveKey('remarks');
+    
+    // Step 1 (again): Employee resubmits
+    $this->actingAs($this->employee);
+    $request->refresh();
+    
+    $request->transition('submit', [
+        'attachments' => ['correct_invoice.pdf'],
+        'remarks' => 'Updated invoice attached',
+    ]);
+    
+    expect($request->refresh()->status)->toBe('under_review');
+    
+    // Step 2 (again): Reviewer approves
+    $this->actingAs($this->reviewer);
+    $request->refresh();
+    
+    $request->transition('approve');
+    
+    expect($request->refresh()->status)->toBe('approved');
+    
+    // Step 3: Finance processes payment
+    $this->actingAs($this->finance);
+    $request->refresh();
+    
+    $request->transition('process_payment', [
+        'payment_proof' => 'payment_receipt.pdf',
+        'processed_at' => now(),
+        'metadata' => ['payment_method' => 'bank_transfer'],
+    ]);
+    
+    expect($request->refresh()->status)->toBe('completed');
+    
+    // Verify complete history
+    $history = $request->transitionHistory();
+    
+    expect($history)->toHaveCount(5)
+        ->and($history[0]['transition'])->toBe('submit')
+        ->and($history[1]['transition'])->toBe('request_revision')
+        ->and($history[2]['transition'])->toBe('submit')
+        ->and($history[3]['transition'])->toBe('approve')
+        ->and($history[4]['transition'])->toBe('process_payment');
+});
+
+test('workflow prevents illegal transitions', function () {
+    $this->actingAs($this->employee);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->employee->id,
+        'status' => 'draft',
+        'description' => 'Test',
+    ]);
+    
+    // Cannot approve from draft
+    expect($request->canTransition('approve'))->toBeFalse();
+    
+    // Submit first
+    $request->transition('submit', ['attachments' => ['file.pdf']]);
+    
+    // Cannot submit again (already under review)
+    expect($request->canTransition('submit'))->toBeFalse();
+    
+    // Employee cannot approve their own request
+    $this->actingAs($this->employee);
+    expect($request->canTransition('approve'))->toBeFalse();
+    
+    // Switch to reviewer
+    $this->actingAs($this->reviewer);
+    $request->refresh();
+    
+    // Cannot process payment from under_review
+    expect($request->canTransition('process_payment'))->toBeFalse();
+});
+
+test('workflow with conditional transitions - simplified', function () {
+    // Create a custom workflow with conditions
+    $customConfig = [
+        'state_column' => 'status',
+        'states' => [
+            ['value' => 'draft', 'label' => 'Draft', 'is_initial' => true],
+            ['value' => 'under_review', 'label' => 'Under Review'],
+            ['value' => 'approved', 'label' => 'Approved'],
+        ],
+        'transitions' => [
+            [
+                'name' => 'submit',
+                'from' => 'draft',
+                'to' => 'under_review',
+                'guard' => 'workflow.can_submit',
+            ],
+            [
+                'name' => 'approve',
+                'from' => 'under_review',
+                'to' => 'approved',
+                'guard' => 'workflow.can_approve',
+            ],
+        ],
+        'conditions' => [
+            'approve' => function($model) {
+                \Log::debug("Condition called with amount: " . $model->amount);
+                return $model->amount <= 5000;
+            },
+        ],
+    ];
+    
+    // Set the config
+    config()->set('workflow.workflows.simple_conditional', $customConfig);
+    
+    // Verify config was set
+    $retrieved = config('workflow.workflows.simple_conditional');
+    
+    $this->actingAs($this->reviewer);
+    
+    // Create request with large amount
+    $request = PaymentRequest::factory()->create([
+        'status' => 'under_review',
+        'amount' => 10000,
+    ]);
+    
+    // Manually create workflow to test
+    $workflow = new StateMachine('simple_conditional', $customConfig);
+    
+    $canApprove = $workflow->can($request, 'approve');
+    
+    expect($canApprove)->toBeFalse();
+});
+
+
+tests/Feature/WorkflowEngineTest.php
+<?php
+
+use Adichan\WorkflowEngine\States\StateMachine;
+use Adichan\WorkflowEngine\Enums\WorkflowGuard;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\PaymentRequest;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\User;
+use Illuminate\Support\Facades\Gate;
+
+beforeEach(function () {
+    $this->user = User::factory()->create(['role' => 'employee']);
+    $this->reviewer = User::factory()->create(['role' => 'reviewer']);
+    $this->finance = User::factory()->create(['role' => 'finance']);
+
+    // Define workflow config
+    $this->testWorkflowConfig = [
+        'state_column' => 'status',
+        'states' => [
+            ['value' => 'draft', 'label' => 'Draft', 'is_initial' => true],
+            ['value' => 'under_review', 'label' => 'Under Review'],
+            ['value' => 'approved', 'label' => 'Approved'],
+            ['value' => 'rejected', 'label' => 'Rejected', 'is_final' => true],
+            ['value' => 'completed', 'label' => 'Completed', 'is_final' => true],
+        ],
+        'transitions' => [
+            [
+                'name' => 'submit',
+                'from' => 'draft',
+                'to' => 'under_review',
+                'guard' => 'workflow.can_submit',
+            ],
+            [
+                'name' => 'approve',
+                'from' => 'under_review',
+                'to' => 'approved',
+                'guard' => 'workflow.can_approve',
+            ],
+            [
+                'name' => 'reject',
+                'from' => 'under_review',
+                'to' => 'rejected',
+                'guard' => 'workflow.can_reject',
+            ],
+            [
+                'name' => 'request_revision',
+                'from' => 'under_review',
+                'to' => 'draft',
+                'guard' => 'workflow.can_request_revision',
+            ],
+            [
+                'name' => 'process_payment',
+                'from' => 'approved',
+                'to' => 'completed',
+                'guard' => 'workflow.can_process_payment',
+            ],
+        ],
+    ];
+
+    // Setup gates - ensure they work with our mock User model
+    Gate::define('workflow.can_submit', function ($user) {
+        return in_array($user->role, ['employee', 'manager']);
+    });
+
+    Gate::define('workflow.can_approve', function ($user) {
+        return in_array($user->role, ['reviewer', 'manager', 'director']);
+    });
+
+    Gate::define('workflow.can_reject', function ($user) {
+        return in_array($user->role, ['reviewer', 'manager', 'director']);
+    });
+
+    Gate::define('workflow.can_request_revision', function ($user) {
+        return in_array($user->role, ['reviewer', 'manager']);
+    });
+
+    Gate::define('workflow.can_process_payment', function ($user) {
+        return in_array($user->role, ['finance']);
+    });
+});
+
+it('creates workflow instance', function () {
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    
+    expect($workflow)->toBeInstanceOf(StateMachine::class);
+});
+
+it('returns available transitions', function () {
+    // We need to be authenticated as the right user
+    $this->actingAs($this->user);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'draft',
+    ]);
+
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    $transitions = $workflow->getAvailableTransitions($request);
+    
+    // Debug output to see what's happening
+    if (empty($transitions)) {
+        \Log::debug('No transitions available. Current user role:', ['role' => $this->user->role]);
+        \Log::debug('Current state:', ['status' => $request->status]);
+        \Log::debug('Gate check result:', ['can_submit' => Gate::allows('workflow.can_submit', $request)]);
+    }
+    
+    expect($transitions)->toHaveKey('submit');
+});
+
+it('allows employee to submit draft', function () {
+    $this->actingAs($this->user);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'draft',
+    ]);
+
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    
+    expect($workflow->can($request, 'submit'))->toBeTrue();
+});
+
+it('prevents non-reviewer from approving', function () {
+    $this->actingAs($this->user); // Employee, not reviewer
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'under_review',
+    ]);
+
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    
+    expect($workflow->can($request, 'approve'))->toBeFalse();
+});
+
+it('allows reviewer to approve', function () {
+    $this->actingAs($this->reviewer);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'under_review',
+    ]);
+
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    
+    expect($workflow->can($request, 'approve'))->toBeTrue();
+});
+
+it('applies transition successfully', function () {
+    $this->actingAs($this->user);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'draft',
+    ]);
+
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    $transition = $workflow->apply($request, 'submit', [
+        'attachments' => ['file1.pdf'],
+    ]);
+    
+    expect($request->refresh()->status)->toBe('under_review')
+        ->and($transition->getTransitionName())->toBe('submit')
+        ->and($transition->getFromState())->toBe('draft')
+        ->and($transition->getToState())->toBe('under_review');
+});
+
+it('prevents invalid transition', function () {
+    $this->actingAs($this->user);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'draft',
+    ]);
+
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    
+    expect(fn() => $workflow->apply($request, 'approve'))
+        ->toThrow(\DomainException::class);
+});
+
+it('maintains transition history', function () {
+    $this->actingAs($this->user);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'draft',
+    ]);
+
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    
+    $workflow->apply($request, 'submit');
+    $request->refresh();
+    
+    $this->actingAs($this->reviewer);
+    $workflow->apply($request, 'approve');
+    
+    $history = $workflow->getHistory($request);
+    
+    expect($history)->toHaveCount(2)
+        ->and($history[0]['transition'])->toBe('submit')
+        ->and($history[1]['transition'])->toBe('approve');
+});
+
+it('enforces workflow rules', function () {
+    $this->actingAs($this->finance);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'under_review', // Not approved yet
+    ]);
+
+    $workflow = new StateMachine('payment_request', $this->testWorkflowConfig);
+    
+    expect($workflow->can($request, 'process_payment'))->toBeFalse();
+});
+
+it('validates transition context', function () {
+    // Create a modified config with validator
+    $config = $this->testWorkflowConfig;
+    
+    // Add validator to the request_revision transition
+    foreach ($config['transitions'] as &$transition) {
+        if ($transition['name'] === 'request_revision') {
+            $transition['validator'] = function($context) {
+                return isset($context['remarks']) && !empty($context['remarks']);
+            };
+        }
+    }
+    
+    $this->actingAs($this->reviewer);
+    
+    $request = PaymentRequest::factory()->create([
+        'user_id' => $this->user->id,
+        'status' => 'under_review',
+    ]);
+
+    $workflow = new StateMachine('payment_request', $config);
+    
+    expect($workflow->can($request, 'request_revision', []))->toBeFalse()
+        ->and($workflow->can($request, 'request_revision', ['remarks' => 'Need revision']))->toBeTrue();
+});
+
+
+tests/Mocks/Factories/PaymentRequestFactory.php
+<?php
+
+namespace Adichan\WorkflowEngine\Tests\Mocks\Factories;
+
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\PaymentRequest;
+
+class PaymentRequestFactory extends Factory
+{
+    protected $model = PaymentRequest::class;
+
+    public function definition(): array
+    {
+        return [
+            'user_id' => fn() => UserFactory::new()->create()->id,
+            'title' => $this->faker->sentence(),
+            'description' => $this->faker->paragraph(),
+            'amount' => $this->faker->randomFloat(2, 100, 10000),
+            'status' => 'draft',
+            'attachments' => [],
+            'payment_due_date' => now()->addDays(30),
+            'assigned_to' => null,
+            'paid_at' => null,
+            'payment_confirmation' => null,
+        ];
+    }
+
+    public function draft(): self
+    {
+        return $this->state([
+            'status' => 'draft',
+        ]);
+    }
+
+    public function underReview(): self
+    {
+        return $this->state([
+            'status' => 'under_review',
+        ]);
+    }
+
+    public function approved(): self
+    {
+        return $this->state([
+            'status' => 'approved',
+        ]);
+    }
+
+    public function rejected(): self
+    {
+        return $this->state([
+            'status' => 'rejected',
+        ]);
+    }
+
+    public function completed(): self
+    {
+        return $this->state([
+            'status' => 'completed',
+            'paid_at' => now(),
+        ]);
+    }
+
+    public function withAttachments(array $attachments): self
+    {
+        return $this->state([
+            'attachments' => $attachments,
+        ]);
+    }
+
+    public function withAmount(float $amount): self
+    {
+        return $this->state([
+            'amount' => $amount,
+        ]);
+    }
+
+    public function overdue(): self
+    {
+        return $this->state([
+            'payment_due_date' => now()->subDays(10),
+        ]);
+    }
+}
+
+
+tests/Mocks/Factories/UserFactory.php
+<?php
+
+namespace Adichan\WorkflowEngine\Tests\Mocks\Factories;
+
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\User;
+
+class UserFactory extends Factory
+{
+    protected $model = User::class;
+
+    public function definition(): array
+    {
+        return [
+            'name' => $this->faker->name(),
+            'email' => $this->faker->unique()->safeEmail(),
+            'role' => 'employee',
+            'password' => bcrypt('password'),
+            'email_verified_at' => now(),
+        ];
+    }
+
+    public function employee(): self
+    {
+        return $this->state([
+            'role' => 'employee',
+        ]);
+    }
+
+    public function reviewer(): self
+    {
+        return $this->state([
+            'role' => 'reviewer',
+        ]);
+    }
+
+    public function finance(): self
+    {
+        return $this->state([
+            'role' => 'finance',
+        ]);
+    }
+
+    public function manager(): self
+    {
+        return $this->state([
+            'role' => 'manager',
+        ]);
+    }
+
+    public function director(): self
+    {
+        return $this->state([
+            'role' => 'director',
+        ]);
+    }
+}
+
+
+tests/Mocks/Models/PaymentRequest.php
+<?php
+
+namespace Adichan\WorkflowEngine\Tests\Mocks\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Adichan\WorkflowEngine\Traits\HasWorkflow;
+use Adichan\WorkflowEngine\Tests\Mocks\Factories\PaymentRequestFactory;
+
+class PaymentRequest extends Model
+{
+    use HasFactory, HasWorkflow;
+
+    protected $fillable = [
+        'user_id',
+        'title',
+        'description',
+        'amount',
+        'status',
+        'attachments',
+        'payment_due_date',
+        'assigned_to',
+        'paid_at',
+        'payment_confirmation',
+    ];
+
+    protected $casts = [
+        'attachments' => 'array',
+        'amount' => 'decimal:2',
+        'payment_due_date' => 'datetime',
+        'paid_at' => 'datetime',
+    ];
+
+    protected string $workflowName = 'payment_request';
+    protected string $stateColumn = 'status';
+
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function isEditable(): bool
+    {
+        return $this->status === 'draft';
+    }
+
+    public function isApproved(): bool
+    {
+        return in_array($this->status, ['approved', 'completed']);
+    }
+
+    public function canBeProcessed(): bool
+    {
+        return $this->status === 'approved' && $this->payment_due_date > now();
+    }
+
+    protected static function newFactory(): Factory
+    {
+        return PaymentRequestFactory::new();
+    }
+}
+
+
+tests/Mocks/Models/User.php
+<?php
+
+namespace Adichan\WorkflowEngine\Tests\Mocks\Models;
+
+use Adichan\WorkflowEngine\Tests\Mocks\Factories\UserFactory;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Illuminate\Foundation\Auth\User as AuthUser;
+
+class User extends Authenticatable
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'name',
+        'email',
+        'role',
+        'password',
+    ];
+
+    protected $hidden = [
+        'password',
+    ];
+
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+    ];
+
+    public function hasRole(string $role): bool
+    {
+        return $this->role === $role;
+    }
+
+    public function can($ability, $arguments = [])
+    {
+		/* ModelsUser */
+        // Simple role-based permission check for testing
+        $permissions = [
+            'workflow.can_submit' => ['employee', 'manager'],
+            'workflow.can_approve' => ['reviewer', 'manager', 'director'],
+            'workflow.can_reject' => ['reviewer', 'manager', 'director'],
+            'workflow.can_request_revision' => ['reviewer', 'manager'],
+            'workflow.can_process_payment' => ['finance'],
+        ];
+
+        return in_array($this->role, $permissions[$ability] ?? []);
+    }
+
+    protected static function newFactory(): Factory
+    {
+        return UserFactory::new();
+    }
+}
+
+
+tests/Pest.php
+<?php
+
+/*
+|--------------------------------------------------------------------------
+| Test Case
+|--------------------------------------------------------------------------
+|
+| The closure you provide to your test functions is always bound to a specific PHPUnit test
+| case class. By default, that class is "PHPUnit\Framework\TestCase". Of course, you may
+| need to change it using the "pest()" function to bind a different classes or traits.
+|
+*/
+
+use Adichan\WorkflowEngine\Tests\TestCase;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Sleep;
+use Illuminate\Support\Str;
+
+pest()->extend(TestCase::class)
+    /* ->use(RefreshDatabase::class) */
+    ->beforeEach(function (): void {
+        Str::createRandomStringsNormally();
+        Str::createUuidsNormally();
+        Http::preventStrayRequests();
+        Process::preventStrayProcesses();
+        Sleep::fake();
+
+        $this->freezeTime();
+    })
+    ->in('Browser', 'Feature', 'Unit');
+
+/*
+|--------------------------------------------------------------------------
+| Expectations
+|--------------------------------------------------------------------------
+|
+| When you're writing tests, you often need to check that values meet certain conditions. The
+| "expect()" function gives you access to a set of "expectations" methods that you can use
+| to assert different things. Of course, you may extend the Expectation API at any time.
+|
+*/
+
+expect()->extend('toBeOne', function () {
+    return $this->toBe(1);
+});
+
+/*
+|--------------------------------------------------------------------------
+| Functions
+|--------------------------------------------------------------------------
+|
+| While Pest is very powerful out-of-the-box, you may have some testing code specific to your
+| project that you don't want to repeat in every file. Here you can also expose helpers as
+| global functions to help you to reduce the number of lines of code in your test files.
+|
+*/
+
+function something()
+{
+    // ..
+}
+
+
+tests/TestCase.php
+<?php
+
+namespace Adichan\WorkflowEngine\Tests;
+
+use Adichan\WorkflowEngine\WorkflowServiceProvider;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Orchestra\Testbench\TestCase as Orchestra;
+
+class TestCase extends Orchestra
+{
+    use RefreshDatabase;
+
+    protected function getPackageProviders($app)
+    {
+        return [WorkflowServiceProvider::class];
+    }
+
+    protected function defineDatabaseMigrations()
+    {
+        $this->loadMigrationsFrom(__DIR__.'/../src/database/migrations');
+        $this->createUsersTable();
+        $this->createPaymentRequestsTable();
+    }
+
+    protected function createUsersTable(): void
+    {
+        if (!\Schema::hasTable('users')) {
+            \Schema::create('users', function ($table) {
+                $table->id();
+                $table->string('name');
+                $table->string('role');
+                $table->timestamp('email_verified_at')->nullable();
+                $table->string('password');
+                $table->string('email')->unique();
+                $table->rememberToken();
+                $table->timestamps();
+            });
+        }
+    }
+
+    protected function createPaymentRequestsTable(): void
+    {
+        if (!\Schema::hasTable('payment_requests')) {
+            \Schema::create('payment_requests', function ($table) {
+                $table->id();
+                $table->foreignId('user_id')->constrained()->onDelete('cascade');
+                $table->string('title');
+                $table->string('workflowName')->nullable();
+                $table->text('description');
+                $table->decimal('amount', 10, 2);
+                $table->string('status')->default('draft');
+                $table->json('attachments')->nullable();
+                $table->dateTime('payment_due_date');
+                $table->string('assigned_to')->nullable();
+                $table->timestamp('paid_at')->nullable();
+                $table->string('payment_confirmation')->nullable();
+                $table->timestamps();
+                
+                $table->index('status');
+                $table->index('user_id');
+            });
+        }
+    }
+
+    protected function getEnvironmentSetUp($app)
+    {
+        // Setup database
+        $app['config']->set('database.default', 'testing');
+        $app['config']->set('database.connections.testing', [
+            'driver' => 'sqlite',
+            'database' => ':memory:',
+            'prefix' => '',
+            'foreign_key_constraints' => true,
+        ]);
+
+        // Load our workflow config
+        $app['config']->set('workflow', require __DIR__.'/../config/workflow.php');
+
+        // Setup auth
+        $app['config']->set('auth.defaults.guard', 'web');
+        $app['config']->set('auth.guards.web', [
+            'driver' => 'session',
+            'provider' => 'users',
+        ]);
+        $app['config']->set('auth.providers.users', [
+            'driver' => 'eloquent',
+            'model' => \Adichan\WorkflowEngine\Tests\Mocks\Models\User::class,
+        ]);
+
+        // Setup basic gates for testing
+        $app['config']->set('workflow.guards', [
+            'workflow.can_submit' => ['employee'],
+            'workflow.can_approve' => ['reviewer', 'manager'],
+            'workflow.can_reject' => ['reviewer', 'manager'],
+            'workflow.can_request_revision' => ['reviewer', 'manager'],
+            'workflow.can_process_payment' => ['finance'],
+        ]);
+
+        // Setup logging
+        $app['config']->set('logging.default', 'single');
+        $app['config']->set('logging.channels.single', [
+            'driver' => 'single',
+            'path' => storage_path('logs/laravel.log'),
+            'level' => 'debug',
+        ]);
+    }
+}
+
+
+tests/Unit/WorkflowEngineTest.php
+<?php
+
+use Adichan\WorkflowEngine\Tests\TestCase;
+use Adichan\WorkflowEngine\Workflows\PaymentRequestWorkflow;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\PaymentRequest;
+use Adichan\WorkflowEngine\Tests\Mocks\Models\User;
+use Illuminate\Support\Facades\Gate;
+
+beforeEach(function () {
+    Gate::define('workflow.can_submit', fn($user) => $user->hasRole('employee'));
+    Gate::define('workflow.can_approve', fn($user) => $user->hasRole('reviewer'));
+    Gate::define('workflow.can_process_payment', fn($user) => $user->hasRole('finance'));
+});
+
+test('workflow transitions respect business rules', function () {
+    $workflow = new PaymentRequestWorkflow();
+    
+    $user = User::factory()->employee()->create();
+    $paymentRequest = PaymentRequest::factory()->draft()->create([
+        'user_id' => $user->id,
+        'description' => 'Test',
+        'amount' => 150000, // Over 100k limit
+    ]);
+    
+    // Submit first
+    $this->actingAs($user);
+    $workflow->apply($paymentRequest, 'submit', ['attachments' => ['file.pdf']]);
+    $paymentRequest->refresh();
+    
+    // Now under review, but amount > 100k so cannot approve (per condition)
+    $this->actingAs(User::factory()->reviewer()->create());
+    expect($workflow->can($paymentRequest, 'approve'))->toBeFalse();
+});
+
+test('workflow hooks execute properly', function () {
+    $workflow = new PaymentRequestWorkflow();
+    
+    $user = User::factory()->employee()->create();
+    $paymentRequest = PaymentRequest::factory()->draft()->create([
+        'user_id' => $user->id,
+        'description' => '', // Empty description - should trigger hook
+    ]);
+    
+    // Should fail before hook validation (description is empty)
+    $this->actingAs($user);
+    
+    expect(fn() => $workflow->apply($paymentRequest, 'submit', [
+        'attachments' => ['file.pdf'],
+    ]))->toThrow(\DomainException::class, 'Description is required');
+});
+
+test('workflow with multiple conditions', function () {
+    $workflow = new PaymentRequestWorkflow();
+    
+    $user = User::factory()->employee()->create();
+    $paymentRequest = PaymentRequest::factory()->approved()->create([
+        'user_id' => $user->id,
+        'payment_due_date' => now()->subDays(1), // Overdue
+    ]);
+    
+    $financeUser = User::factory()->finance()->create();
+    $this->actingAs($financeUser);
+    
+    // Cannot process overdue payment (per condition)
+    expect($workflow->can($paymentRequest, 'process_payment', [
+        'payment_proof' => 'proof.pdf',
+        'processed_at' => now(),
+    ]))->toBeFalse();
+});
+
+test('workflow applies transitions correctly', function () {
+    $workflow = new PaymentRequestWorkflow();
+    
+    $user = User::factory()->employee()->create();
+    $paymentRequest = PaymentRequest::factory()->draft()->create([
+        'user_id' => $user->id,
+        'description' => 'Valid description',
+        'amount' => 50000,
+    ]);
+    
+    // Submit with attachments
+    $this->actingAs($user);
+    $transition = $workflow->apply($paymentRequest, 'submit', [
+        'attachments' => ['invoice.pdf'],
+    ]);
+    
+    expect($paymentRequest->refresh()->status)->toBe('under_review')
+        ->and($transition->getFromState())->toBe('draft')
+        ->and($transition->getToState())->toBe('under_review');
+});
+
+

@@ -99,6 +99,71 @@ return [
                 ],
             ],
         ],
+
+        'complex_approval' => [
+            'state_column' => 'status',
+            'states' => [
+                ['value' => 'draft', 'label' => 'Draft', 'is_initial' => true],
+                ['value' => 'awaiting_manager', 'label' => 'Awaiting Manager Approval'],
+                ['value' => 'awaiting_director', 'label' => 'Awaiting Director Approval'],
+                ['value' => 'awaiting_finance', 'label' => 'Awaiting Finance Processing'],
+                ['value' => 'approved', 'label' => 'Approved', 'is_final' => false],
+                ['value' => 'rejected', 'label' => 'Rejected', 'is_final' => true],
+                ['value' => 'completed', 'label' => 'Completed', 'is_final' => true],
+
+            ],
+            'transitions' => [
+                [
+                    'name' => 'submit_for_manager',
+
+                    'from' => 'draft',
+                    'to' => 'awaiting_manager',
+                    'guard' => 'workflow.can_submit',
+
+                ],
+                [
+                    'name' => 'manager_approve',
+                    'from' => 'awaiting_manager',
+                    'to' => 'awaiting_director',
+                    'guard' => 'workflow.can_approve',
+                ],
+                [
+                    'name' => 'director_approve',
+                    'from' => 'awaiting_director',
+                    'to' => 'awaiting_finance',
+                    'guard' => 'workflow.can_approve',
+                    'condition' => fn ($model) => $model->amount > 5000,
+                ],
+                [
+                    'name' => 'finance_process',
+                    'from' => 'awaiting_finance',
+                    'to' => 'completed',
+                    'guard' => 'workflow.can_process_payment',
+                ],
+            ],
+            'approval_levels' => [
+                'manager_approval' => [
+
+                    'required_role' => 'manager',
+                    'state' => 'awaiting_manager',
+                    'assign_to_field' => 'manager_id', // Model field with assigned manager
+
+                    'can_delegate' => true,
+
+                ],
+                'director_approval' => [
+                    'required_role' => 'director',
+                    'state' => 'awaiting_director',
+                    'amount_threshold' => 5000, // Only required for amounts > $5k
+                    'auto_assign_to' => 'department.director_id', // Relationship path
+                ],
+                'finance_processing' => [
+                    'required_role' => 'finance',
+                    'state' => 'awaiting_finance',
+                    'prerequisites' => ['manager_approval', 'director_approval'],
+                ],
+            ],
+        ],
     ],
 
     /*
