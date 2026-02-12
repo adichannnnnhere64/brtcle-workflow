@@ -16,10 +16,10 @@ class WorkflowServiceProvider extends ServiceProvider
         ], 'workflow-config');
 
         $this->publishes([
-            __DIR__.'/../database/migrations' => database_path('migrations'),
+            __DIR__.'/database/migrations' => database_path('migrations'),
         ], 'workflow-migrations');
 
-        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+        $this->loadMigrationsFrom(__DIR__.'/database/migrations');
 
         $this->registerGates();
     }
