@@ -8,22 +8,22 @@ use Adichan\WorkflowEngine\Models\WorkflowApproval;
 trait HasWorkflow
 {
     private ?StateMachine $workflow = null;
-    
+
     protected string $stateColumn = 'status';
 
     public function workflow(): StateMachine
     {
         if (!$this->workflow) {
             $workflowName = $this->getWorkflowName();
-            
+
             // Get config from the correct location
             $workflows = config('workflow.workflows', []);
             $definition = $workflows[$workflowName] ?? null;
 
             if (!$definition) {
                 // Fallback to old config path for backward compatibility
-                $definition = config("workflows.{$workflowName}");
-                
+                $definition = config("workflow.{$workflowName}");
+
                 if (!$definition) {
                     throw new \RuntimeException("Workflow '{$workflowName}' not defined. Check your workflow configuration.");
                 }
@@ -41,12 +41,12 @@ trait HasWorkflow
         if (property_exists($this, 'workflowName') && !empty($this->workflowName)) {
             return $this->workflowName;
         }
-        
+
         // Check if we have a attribute set
         if (method_exists($this, 'getAttribute') && $this->getAttribute('workflowName')) {
             return $this->getAttribute('workflowName');
         }
-        
+
         // Default to class basename
         return class_basename($this);
     }
@@ -58,15 +58,15 @@ trait HasWorkflow
     {
         // Set as property
         $this->workflowName = $name;
-        
+
         // Also set in attributes for Eloquent models
         if (method_exists($this, 'setAttribute')) {
             $this->setAttribute('workflowName', $name);
         }
-        
+
         // Reset workflow instance to force reload with new name
         $this->workflow = null;
-        
+
         return $this;
     }
 
@@ -83,7 +83,7 @@ trait HasWorkflow
         if (property_exists($this, 'stateColumn')) {
             return $this->stateColumn;
         }
-        
+
         return 'status';
     }
 
@@ -116,7 +116,7 @@ trait HasWorkflow
     public function approveLevel(string $levelName, array $context = [])
     {
         $transition = $this->determineTransitionForLevel($levelName);
-        
+
         return $this->workflow()->applyWithApproval(
             $this,
             $transition,
@@ -155,16 +155,16 @@ trait HasWorkflow
     {
         $definition = $this->workflow()->getDefinition();
         $config = $definition['approval_levels'][$levelName] ?? null;
-        
+
         // If transition is explicitly defined, use it
         if ($config && isset($config['transition'])) {
             return $config['transition'];
         }
-        
+
         // Try to infer from state configuration
         $currentState = $this->workflow()->getState($this);
         $transitions = $this->workflow()->getAvailableTransitions($this);
-        
+
         // Return first available transition if not specified
         return !empty($transitions) ? array_key_first($transitions) : null;
     }
