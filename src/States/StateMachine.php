@@ -20,20 +20,20 @@ class StateMachine implements WorkflowInterface
 
     private array $pendingApprovals = [];
 
-	protected array $approvalLevels = [];
+    protected array $approvalLevels = [];
 
     public function __construct(
         protected string $workflowName,
         protected array $definition
     ) {
         $this->initializeStates();
-	 $this->initializeApprovalLevels();
+        $this->initializeApprovalLevels();
     }
 
-	private function initializeApprovalLevels(): void
-{
-    $this->approvalLevels = $this->definition['approval_levels'] ?? [];
-}
+    private function initializeApprovalLevels(): void
+    {
+        $this->approvalLevels = $this->definition['approval_levels'] ?? [];
+    }
 
     private function initializeStates(): void
     {
@@ -141,6 +141,7 @@ class StateMachine implements WorkflowInterface
                 'to_state' => $newState,
                 'context' => $context,
                 'performed_by' => auth()->id(),
+                'performed_at' => now(),
                 'metadata' => $context['metadata'] ?? [],
                 'performed_at' => now(),
             ]);
@@ -154,7 +155,8 @@ class StateMachine implements WorkflowInterface
                 $transition,
                 $previousState,
                 $newState,
-                $context
+                $context,
+                now()
             ));
 
             return $transitionRecord;
@@ -180,7 +182,6 @@ class StateMachine implements WorkflowInterface
         if (! $config) {
             return false;
         }
-
 
         // Check guard
         $guardValue = $config['guard'] instanceof WorkflowGuard
@@ -267,469 +268,504 @@ class StateMachine implements WorkflowInterface
         }
     }
 
-	// src/States/StateMachine.php
+    // src/States/StateMachine.php
 
-public function getPendingApprovals(Model $model): array
-{
-    if (empty($this->approvalLevels)) {
-        return [];
-    }
-
-    $stateColumn = $this->definition['state_column'] ?? 'status';
-    $currentState = $model->{$stateColumn};
-    $pending = [];
-
-    foreach ($this->approvalLevels as $levelName => $config) {
-        // Check if this approval level is relevant for current state
-        if (isset($config['state']) && $config['state'] !== $currentState) {
-            continue;
+    public function getPendingApprovals(Model $model): array
+    {
+        if (empty($this->approvalLevels)) {
+            return [];
         }
 
-        // Check if approval is already completed
-        if ($this->isApprovalCompleted($model, $levelName)) {
-            continue;
+        $stateColumn = $this->definition['state_column'] ?? 'status';
+        $currentState = $model->{$stateColumn};
+        $pending = [];
+
+        foreach ($this->approvalLevels as $levelName => $config) {
+            // Check if this approval level is relevant for current state
+            if (isset($config['state']) && $config['state'] !== $currentState) {
+                continue;
+            }
+
+            // Check if approval is already completed
+            if ($this->isApprovalCompleted($model, $levelName)) {
+                continue;
+            }
+
+            // Check if approval is required (based on conditions)
+            if (! $this->isApprovalRequired($model, $levelName)) {
+                continue;
+            }
+
+            $pending[$levelName] = [
+                'level' => $levelName,
+                'label' => $config['label'] ?? ucfirst(str_replace('_', ' ', $levelName)),
+                'required_role' => $config['required_role'],
+                'assigned_to' => $this->getAssignedApprover($model, $levelName),
+                'can_approve' => auth()->check() ? $this->canUserApproveLevel(auth()->user(), $levelName, $model) : false,
+                'config' => $config,
+            ];
         }
 
-        // Check if approval is required (based on conditions)
-        if (!$this->isApprovalRequired($model, $levelName)) {
-            continue;
-        }
-
-        $pending[$levelName] = [
-            'level' => $levelName,
-            'label' => $config['label'] ?? ucfirst(str_replace('_', ' ', $levelName)),
-            'required_role' => $config['required_role'],
-            'assigned_to' => $this->getAssignedApprover($model, $levelName),
-            'can_approve' => auth()->check() ? $this->canUserApproveLevel(auth()->user(), $levelName, $model) : false,
-            'config' => $config,
-        ];
+        return $pending;
     }
 
-    return $pending;
-}
+    public function canUserApproveLevel($user, string $levelName, Model $model): bool
+    {
+        $config = $this->approvalLevels[$levelName] ?? null;
 
-
-public function canUserApproveLevel($user, string $levelName, Model $model): bool
-{
-    $config = $this->approvalLevels[$levelName] ?? null;
-    
-    if (!$config) {
-        return false;
-    }
-
-    // Check role requirement - with null safety
-    if (!$user) {
-        return false;
-    }
-
-    $requiredRole = $config['required_role'] ?? null;
-    if (!$requiredRole) {
-        return false;
-    }
-
-    if (!$this->userHasRole($user, $requiredRole)) {
-        return false;
-    }
-
-    // Check assignment
-    if (isset($config['assign_to_field'])) {
-        $assignedTo = $model->{$config['assign_to_field']};
-        if ($assignedTo && (is_numeric($assignedTo) ? (int)$assignedTo !== (int)$user->id : $assignedTo !== $user->id)) {
+        if (! $config) {
             return false;
         }
-    }
 
-    // Check amount threshold
-    if (isset($config['amount_threshold']) && isset($model->amount)) {
-        if ($model->amount < $config['amount_threshold']) {
+        // Check role requirement - with null safety
+        if (! $user) {
             return false;
         }
-    }
 
-    // Check custom condition
-    if (isset($config['condition']) && is_callable($config['condition'])) {
-        try {
-            if (!$config['condition']($model, $user)) {
+        $requiredRole = $config['required_role'] ?? null;
+        if (! $requiredRole) {
+            return false;
+        }
+
+        if (! $this->userHasRole($user, $requiredRole)) {
+            return false;
+        }
+
+        // Check assignment
+        if (isset($config['assign_to_field'])) {
+            $assignedTo = $model->{$config['assign_to_field']};
+            if ($assignedTo && (is_numeric($assignedTo) ? (int) $assignedTo !== (int) $user->id : $assignedTo !== $user->id)) {
                 return false;
             }
-        } catch (\Exception $e) {
+        }
+
+        // Check amount threshold
+        if (isset($config['amount_threshold']) && isset($model->amount)) {
+            if ($model->amount < $config['amount_threshold']) {
+                return false;
+            }
+        }
+
+        // Check custom condition
+        if (isset($config['condition']) && is_callable($config['condition'])) {
+            try {
+                if (! $config['condition']($model, $user)) {
+                    return false;
+                }
+            } catch (\Exception $e) {
+                return false;
+            }
+        }
+
+        // Check prerequisites
+        if (! $this->arePrerequisitesMet($model, $levelName)) {
             return false;
         }
-    }
 
-    // Check prerequisites
-    if (!$this->arePrerequisitesMet($model, $levelName)) {
-        return false;
-    }
-
-    return true;
-}
-
-
-	// src/States/StateMachine.php
-
-
-	
-	// src/States/StateMachine.php - Fix applyWithApproval method
-
-public function applyWithApproval(
-    Model $model,
-    ?string $transition,
-    string $approvalLevel,
-    array $context = []
-): WorkflowTransitionInterface {
-    // FIRST: Check if approval is already completed
-    // This should be the VERY FIRST check, before anything else
-    if ($this->isApprovalCompleted($model, $approvalLevel)) {
-        throw new \DomainException("Approval level '{$approvalLevel}' has already been completed");
-    }
-
-    // SECOND: Check if transition exists and is available from current state
-    $stateColumn = $this->definition['state_column'] ?? 'status';
-    $currentState = $model->{$stateColumn};
-    $state = $this->states[$currentState] ?? null;
-
-    if (!$state) {
-        throw new \DomainException("Invalid current state: {$currentState}");
-    }
-
-    // If transition is provided, check if it exists from current state
-    if ($transition) {
-        $config = $state->allowedTransitions()[$transition] ?? null;
-        
-        if (!$config) {
-            throw new \DomainException("Transition '{$transition}' not defined from state '{$currentState}'");
-        }
-    }
-
-    // THEN check authentication
-    if (!auth()->check()) {
-        throw new \DomainException("User must be authenticated to approve");
-    }
-
-    // THEN check if approval level exists
-    $levelConfig = $this->approvalLevels[$approvalLevel] ?? null;
-    if (!$levelConfig) {
-        throw new \DomainException("Approval level '{$approvalLevel}' not defined");
-    }
-
-    // THEN check if user can approve at this level
-    if (!$this->canUserApproveLevel(auth()->user(), $approvalLevel, $model)) {
-        throw new \DomainException("User cannot approve at level: {$approvalLevel}");
-    }
-
-    // THEN check if all prerequisites are met
-    if (!$this->arePrerequisitesMet($model, $approvalLevel)) {
-        $prereqs = $this->getUnmetPrerequisites($model, $approvalLevel);
-        throw new \DomainException("Prerequisites not met for level '{$approvalLevel}': " . implode(', ', $prereqs));
-    }
-
-    return DB::transaction(function () use ($model, $transition, $approvalLevel, $context, $stateColumn, $currentState) {
-        // Apply the transition if provided
-        $transitionRecord = null;
-        $newState = $currentState;
-
-        if ($transition) {
-            $state = $this->states[$currentState] ?? null;
-            $config = $state->allowedTransitions()[$transition] ?? null;
-            $newState = $config['to'];
-
-            // Execute BEFORE hooks
-            $this->executeBeforeHooks($transition, $model, $currentState, $newState, $context);
-
-            // Update model state
-            $model->{$stateColumn} = $newState;
-            $model->save();
-
-            // Create transition record
-            $transitionRecord = WorkflowTransition::create([
-                'workflow_type' => $this->workflowName,
-                'model_type' => get_class($model),
-                'model_id' => $model->id,
-                'transition' => $transition,
-                'from_state' => $currentState,
-                'to_state' => $newState,
-                'context' => $context,
-                'performed_by' => auth()->id(),
-                'metadata' => $context['metadata'] ?? [],
-                'performed_at' => now(),
-            ]);
-        }
-
-        // Record the approval
-        $approvalRecord = WorkflowApproval::create([
-            'workflow_transition_id' => $transitionRecord?->id,
-            'approval_level' => $approvalLevel,
-            'approved_by' => auth()->id(),
-            'approved_at' => now(),
-            'comments' => $context['comments'] ?? null,
-            'metadata' => $context['metadata'] ?? [],
-        ]);
-
-        // Execute AFTER hooks
-        if ($transitionRecord) {
-            $this->executeAfterHooks($transition, $model, $currentState, $newState, $context);
-        }
-
-        // Dispatch event
-        if ($transitionRecord) {
-            event(new WorkflowTransitioned(
-                $model,
-                $transition,
-                $currentState,
-                $newState,
-                array_merge($context, ['approval_level' => $approvalLevel])
-            ));
-        }
-
-        return $transitionRecord ?? $approvalRecord;
-    });
-}
-
-public function isApprovalCompleted(Model $model, string $levelName): bool
-{
-    // Check if this approval level was already approved
-    return WorkflowApproval::whereHas('transition', function ($query) use ($model) {
-            $query->where('model_type', get_class($model))
-                  ->where('model_id', $model->id)
-                  ->where('workflow_type', $this->workflowName);
-        })
-        ->where('approval_level', $levelName)
-
-        ->exists();
-}
-
-	// src/States/StateMachine.php
-
-public function isApprovalRequired(Model $model, string $levelName): bool
-{
-    $config = $this->approvalLevels[$levelName] ?? null;
-    
-    if (!$config) {
-        return false;
-    }
-
-    // Check if approval can be skipped
-    if (isset($config['can_skip']) && $config['can_skip'] === true) {
-        if (isset($config['skip_condition']) && is_callable($config['skip_condition'])) {
-            return !$config['skip_condition']($model);
-        }
-    }
-
-    // Check amount threshold
-    if (isset($config['amount_threshold']) && isset($model->amount)) {
-        if ($model->amount < $config['amount_threshold']) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-public function arePrerequisitesMet(Model $model, string $levelName): bool
-{
-    $config = $this->approvalLevels[$levelName] ?? null;
-    
-    if (!isset($config['prerequisites'])) {
         return true;
     }
 
-    foreach ($config['prerequisites'] as $prerequisite) {
-        if (!$this->isApprovalCompleted($model, $prerequisite)) {
-            return false;
-        }
-    }
+    // src/States/StateMachine.php
 
-    return true;
-}
+    // src/States/StateMachine.php - Fix applyWithApproval method
 
-public function getUnmetPrerequisites(Model $model, string $levelName): array
-
-{
-    $config = $this->approvalLevels[$levelName] ?? null;
-
-    $unmet = [];
-    
-    if (!isset($config['prerequisites'])) {
-        return $unmet;
-    }
-
-    foreach ($config['prerequisites'] as $prerequisite) {
-        if (!$this->isApprovalCompleted($model, $prerequisite)) {
-            $unmet[] = $prerequisite;
-        }
-    }
-
-    return $unmet;
-
-}
-
-
-public function areAllApprovalsComplete(Model $model, ?string $targetState = null): bool
-{
-    $stateColumn = $this->definition['state_column'] ?? 'status';
-    $currentState = $model->{$stateColumn};
-    
-    // If target state is provided, check approvals for that state
-    $checkState = $targetState ?? $currentState;
-
-    foreach ($this->approvalLevels as $levelName => $config) {
-        // Only check approvals that are required for this state
-        if (isset($config['state']) && $config['state'] !== $checkState) {
-            continue;
+    public function applyWithApproval(
+        Model $model,
+        ?string $transition,
+        string $approvalLevel,
+        array $context = []
+    ): WorkflowTransitionInterface {
+        // FIRST: Check if approval is already completed
+        // This should be the VERY FIRST check, before anything else
+        if ($this->isApprovalCompleted($model, $approvalLevel)) {
+            throw new \DomainException("Approval level '{$approvalLevel}' has already been completed");
         }
 
-        // Skip if approval is not required
-        if (!$this->isApprovalRequired($model, $levelName)) {
-            continue;
+        // SECOND: Check if transition exists and is available from current state
+        $stateColumn = $this->definition['state_column'] ?? 'status';
+        $currentState = $model->{$stateColumn};
+        $state = $this->states[$currentState] ?? null;
+
+        if (! $state) {
+            throw new \DomainException("Invalid current state: {$currentState}");
         }
 
+        // If transition is provided, check if it exists from current state
+        if ($transition) {
+            $config = $state->allowedTransitions()[$transition] ?? null;
 
-        if (!$this->isApprovalCompleted($model, $levelName)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-public function getAssignedApprover(Model $model, string $levelName): ?array
-{
-    $config = $this->approvalLevels[$levelName] ?? null;
-    
-    if (!$config) {
-        return null;
-    }
-
-    // If explicitly assigned via field
-    if (isset($config['assign_to_field'])) {
-        $assignedId = $model->{$config['assign_to_field']};
-
-        if ($assignedId) {
-            $userModel = config('auth.providers.users.model');
-            $user = $userModel::find($assignedId);
-            if ($user) {
-                return [
-                    'id' => $user->id,
-                    'name' => $user->name,
-                    'email' => $user->email,
-                ];
+            if (! $config) {
+                throw new \DomainException("Transition '{$transition}' not defined from state '{$currentState}'");
             }
         }
 
+        // THEN check authentication
+        if (! auth()->check()) {
+            throw new \DomainException('User must be authenticated to approve');
+        }
+
+        // THEN check if approval level exists
+        $levelConfig = $this->approvalLevels[$approvalLevel] ?? null;
+        if (! $levelConfig) {
+            throw new \DomainException("Approval level '{$approvalLevel}' not defined");
+        }
+
+        // THEN check if user can approve at this level
+        if (! $this->canUserApproveLevel(auth()->user(), $approvalLevel, $model)) {
+            throw new \DomainException("User cannot approve at level: {$approvalLevel}");
+        }
+
+        // THEN check if all prerequisites are met
+        if (! $this->arePrerequisitesMet($model, $approvalLevel)) {
+            $prereqs = $this->getUnmetPrerequisites($model, $approvalLevel);
+            throw new \DomainException("Prerequisites not met for level '{$approvalLevel}': ".implode(', ', $prereqs));
+        }
+
+        return DB::transaction(function () use ($model, $transition, $approvalLevel, $context, $stateColumn, $currentState) {
+            // Apply the transition if provided
+            $transitionRecord = null;
+            $newState = $currentState;
+
+            if ($transition) {
+                $state = $this->states[$currentState] ?? null;
+                $config = $state->allowedTransitions()[$transition] ?? null;
+                $newState = $config['to'];
+
+                // Execute BEFORE hooks
+                $this->executeBeforeHooks($transition, $model, $currentState, $newState, $context);
+
+                // Update model state
+                $model->{$stateColumn} = $newState;
+                $model->save();
+
+                // Create transition record
+                $transitionRecord = WorkflowTransition::create([
+                    'workflow_type' => $this->workflowName,
+                    'model_type' => get_class($model),
+                    'model_id' => $model->id,
+                    'transition' => $transition,
+                    'from_state' => $currentState,
+                    'to_state' => $newState,
+                    'context' => $context,
+                    'performed_by' => auth()->id(),
+                    'metadata' => $context['metadata'] ?? [],
+                    'performed_at' => now(),
+                ]);
+            }
+
+            // Record the approval
+            $approvalRecord = WorkflowApproval::create([
+                'workflow_transition_id' => $transitionRecord?->id,
+                'approval_level' => $approvalLevel,
+                'approved_by' => auth()->id(),
+                'approved_at' => now(),
+                'comments' => $context['comments'] ?? null,
+                'metadata' => $context['metadata'] ?? [],
+            ]);
+
+            // Execute AFTER hooks
+            if ($transitionRecord) {
+                $this->executeAfterHooks($transition, $model, $currentState, $newState, $context);
+            }
+
+            // Dispatch event
+            if ($transitionRecord) {
+                event(new WorkflowTransitioned(
+                    $model,
+                    $transition,
+                    $currentState,
+                    $newState,
+                    array_merge($context, ['approval_level' => $approvalLevel])
+                ));
+            }
+
+            return $transitionRecord ?? $approvalRecord;
+        });
     }
 
-    // Auto-assign based on role and business rules
-    if (isset($config['auto_assign']) && $config['auto_assign'] === true) {
-        return $this->findAutoAssignApprover($model, $levelName);
+    public function isApprovalCompleted(Model $model, string $levelName): bool
+    {
+        // Check if this approval level was already approved
+        return WorkflowApproval::whereHas('transition', function ($query) use ($model) {
+            $query->where('model_type', get_class($model))
+                ->where('model_id', $model->id)
+                ->where('workflow_type', $this->workflowName);
+        })
+            ->where('approval_level', $levelName)
+
+            ->exists();
     }
 
-    return null;
-}
+    // src/States/StateMachine.php
 
-protected function findAutoAssignApprover(Model $model, string $levelName): ?array
-{
-    $config = $this->approvalLevels[$levelName] ?? null;
-    
+    public function isApprovalRequired(Model $model, string $levelName): bool
+    {
+        $config = $this->approvalLevels[$levelName] ?? null;
 
-    if (!$config || !isset($config['required_role'])) {
+        if (! $config) {
+            return false;
+        }
+
+        // Check if approval can be skipped
+        if (isset($config['can_skip']) && $config['can_skip'] === true) {
+            if (isset($config['skip_condition']) && is_callable($config['skip_condition'])) {
+                return ! $config['skip_condition']($model);
+            }
+        }
+
+        // Check amount threshold
+        if (isset($config['amount_threshold']) && isset($model->amount)) {
+            if ($model->amount < $config['amount_threshold']) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public function arePrerequisitesMet(Model $model, string $levelName): bool
+    {
+        $config = $this->approvalLevels[$levelName] ?? null;
+
+        if (! isset($config['prerequisites'])) {
+            return true;
+        }
+
+        foreach ($config['prerequisites'] as $prerequisite) {
+            if (! $this->isApprovalCompleted($model, $prerequisite)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public function getUnmetPrerequisites(Model $model, string $levelName): array
+    {
+        $config = $this->approvalLevels[$levelName] ?? null;
+
+        $unmet = [];
+
+        if (! isset($config['prerequisites'])) {
+            return $unmet;
+        }
+
+        foreach ($config['prerequisites'] as $prerequisite) {
+            if (! $this->isApprovalCompleted($model, $prerequisite)) {
+                $unmet[] = $prerequisite;
+            }
+        }
+
+        return $unmet;
+
+    }
+
+    public function areAllApprovalsComplete(Model $model, ?string $targetState = null): bool
+    {
+        $stateColumn = $this->definition['state_column'] ?? 'status';
+        $currentState = $model->{$stateColumn};
+
+        // If target state is provided, check approvals for that state
+        $checkState = $targetState ?? $currentState;
+
+        foreach ($this->approvalLevels as $levelName => $config) {
+            // Only check approvals that are required for this state
+            if (isset($config['state']) && $config['state'] !== $checkState) {
+                continue;
+            }
+
+            // Skip if approval is not required
+            if (! $this->isApprovalRequired($model, $levelName)) {
+                continue;
+            }
+
+            if (! $this->isApprovalCompleted($model, $levelName)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public function getAssignedApprover(Model $model, string $levelName): ?array
+    {
+        $config = $this->approvalLevels[$levelName] ?? null;
+
+        if (! $config) {
+            return null;
+        }
+
+        // If explicitly assigned via field
+        if (isset($config['assign_to_field'])) {
+            $assignedId = $model->{$config['assign_to_field']};
+
+            if ($assignedId) {
+                $userModel = config('auth.providers.users.model');
+                $user = $userModel::find($assignedId);
+                if ($user) {
+                    return [
+                        'id' => $user->id,
+                        'name' => $user->name,
+                        'email' => $user->email,
+                    ];
+                }
+            }
+
+        }
+
+        // Auto-assign based on role and business rules
+        if (isset($config['auto_assign']) && $config['auto_assign'] === true) {
+            return $this->findAutoAssignApprover($model, $levelName);
+        }
+
         return null;
     }
 
-    $userModel = config('auth.providers.users.model');
-    
-    // Simple auto-assign: find first user with required role
-    // This can be enhanced based on your business logic
-    $approver = $userModel::where('role', $config['required_role'])->first();
-    
-    if ($approver) {
-        return [
-            'id' => $approver->id,
-            'name' => $approver->name,
-            'email' => $approver->email,
-        ];
+    protected function findAutoAssignApprover(Model $model, string $levelName): ?array
+    {
+        $config = $this->approvalLevels[$levelName] ?? null;
+
+        if (! $config || ! isset($config['required_role'])) {
+            return null;
+        }
+
+        $userModel = config('auth.providers.users.model');
+
+        // Simple auto-assign: find first user with required role
+        // This can be enhanced based on your business logic
+        $approver = $userModel::where('role', $config['required_role'])->first();
+
+        if ($approver) {
+            return [
+                'id' => $approver->id,
+                'name' => $approver->name,
+                'email' => $approver->email,
+            ];
+        }
+
+        return null;
     }
 
-    return null;
-}
+    protected function userHasRole($user, string $role): bool
+    {
+        if (method_exists($user, 'hasRole')) {
+            return $user->hasRole($role);
+        }
 
-protected function userHasRole($user, string $role): bool
-{
-    if (method_exists($user, 'hasRole')) {
-        return $user->hasRole($role);
+        // Fallback to role property or attribute
+        return $user->role === $role || $user->getAttribute('role') === $role;
     }
-    
-    // Fallback to role property or attribute
-    return $user->role === $role || $user->getAttribute('role') === $role;
-}
 
-	// src/States/StateMachine.php
+    // src/States/StateMachine.php
 
-public function determineNextState(Model $model, string $transition, string $approvalLevel): string
-{
-    $state = $this->states[$model->{$this->definition['state_column'] ?? 'status'}] ?? null;
-    
-    if (!$state) {
-        throw new \DomainException("Invalid current state");
-    }
-    
-    $config = $state->allowedTransitions()[$transition] ?? null;
-    
-    if (!$config) {
-        throw new \DomainException("Transition '{$transition}' not defined");
-    }
-    
-    $defaultNextState = $config['to'];
-    
-    // Check if we should skip any approval levels
-    $nextState = $defaultNextState;
-    $currentCheckState = $defaultNextState;
-    $maxSkipLevels = 3; // Prevent infinite loops
-    $skipCount = 0;
-    
-    while ($skipCount < $maxSkipLevels) {
-        $approvalsForNextState = array_filter($this->approvalLevels, 
-            fn($level) => ($level['state'] ?? null) === $currentCheckState
-        );
-        
-        $allSkippable = true;
-        foreach ($approvalsForNextState as $levelName => $levelConfig) {
-            if (!$this->isApprovalRequired($model, $levelName)) {
-                // This approval can be skipped, find the transition out of this state
+    public function determineNextState(Model $model, string $transition, string $approvalLevel): string
+    {
+        $state = $this->states[$model->{$this->definition['state_column'] ?? 'status'}] ?? null;
+
+        if (! $state) {
+            throw new \DomainException('Invalid current state');
+        }
+
+        $config = $state->allowedTransitions()[$transition] ?? null;
+
+        if (! $config) {
+            throw new \DomainException("Transition '{$transition}' not defined");
+        }
+
+        $defaultNextState = $config['to'];
+
+        // Check if we should skip any approval levels
+        $nextState = $defaultNextState;
+        $currentCheckState = $defaultNextState;
+        $maxSkipLevels = 3; // Prevent infinite loops
+        $skipCount = 0;
+
+        while ($skipCount < $maxSkipLevels) {
+            $approvalsForNextState = array_filter($this->approvalLevels,
+                fn ($level) => ($level['state'] ?? null) === $currentCheckState
+            );
+
+            $allSkippable = true;
+            foreach ($approvalsForNextState as $levelName => $levelConfig) {
+                if (! $this->isApprovalRequired($model, $levelName)) {
+                    // This approval can be skipped, find the transition out of this state
+                    $nextStateObj = $this->states[$currentCheckState] ?? null;
+                    if ($nextStateObj) {
+                        $transitions = $nextStateObj->allowedTransitions();
+                        if (! empty($transitions)) {
+                            // Use the first available transition
+                            $firstTransition = array_key_first($transitions);
+                            $currentCheckState = $transitions[$firstTransition]['to'];
+
+                            continue 2; // Continue checking the new state
+                        }
+                    }
+                } else {
+                    $allSkippable = false;
+                    break;
+                }
+            }
+
+            if ($allSkippable && ! empty($approvalsForNextState)) {
+                // All approvals for this state are skippable, move to next state
                 $nextStateObj = $this->states[$currentCheckState] ?? null;
                 if ($nextStateObj) {
                     $transitions = $nextStateObj->allowedTransitions();
-                    if (!empty($transitions)) {
-                        // Use the first available transition
+                    if (! empty($transitions)) {
                         $firstTransition = array_key_first($transitions);
                         $currentCheckState = $transitions[$firstTransition]['to'];
-                        continue 2; // Continue checking the new state
+                        $skipCount++;
+
+                        continue;
                     }
                 }
-            } else {
-                $allSkippable = false;
-                break;
             }
+
+            break;
         }
-        
-        if ($allSkippable && !empty($approvalsForNextState)) {
-            // All approvals for this state are skippable, move to next state
-            $nextStateObj = $this->states[$currentCheckState] ?? null;
-            if ($nextStateObj) {
-                $transitions = $nextStateObj->allowedTransitions();
-                if (!empty($transitions)) {
-                    $firstTransition = array_key_first($transitions);
-                    $currentCheckState = $transitions[$firstTransition]['to'];
-                    $skipCount++;
-                    continue;
-                }
-            }
-        }
-        
-        break;
+
+        return $currentCheckState;
     }
-    
-    return $currentCheckState;
-}
-    
+
+    public function isOverdue(Model $model, string $state, int $slaHours = 24): bool
+    {
+        $enteredStateAt = WorkflowTransition::where('model_type', get_class($model))
+            ->where('model_id', $model->id)
+            ->where('to_state', $state)
+            ->orderBy('performed_at', 'desc')
+            ->value('performed_at');
+
+        if (! $enteredStateAt) {
+            return false;
+        }
+
+        return now()->diffInHours($enteredStateAt) > $slaHours;
+    }
+
+    public function getTransitionStatistics(array $options = []): array
+    {
+        $query = WorkflowTransition::where('workflow_type', $this->workflowName);
+
+        if (isset($options['from'])) {
+            $query->where('performed_at', '>=', $options['from']);
+        }
+
+        if (isset($options['to'])) {
+            $query->where('performed_at', '<=', $options['to']);
+        }
+
+        return [
+            'total_transitions' => $query->count(),
+            'by_transition' => $query->groupBy('transition')
+                ->selectRaw('transition, count(*) as count')
+                ->pluck('count', 'transition')
+                ->toArray(),
+            'average_duration' => $query->selectRaw('AVG(TIMESTAMPDIFF(SECOND, performed_at, created_at)) as avg')
+                ->value('avg'),
+            'peak_hours' => $query->selectRaw('HOUR(performed_at) as hour, count(*) as count')
+                ->groupBy('hour')
+                ->orderBy('count', 'desc')
+                ->first(),
+        ];
+    }
 }

@@ -18,6 +18,9 @@ class WorkflowTransitioned
         public string $transition,
         public string $fromState,
         public string $toState,
-        public array $context = []
-    ) {}
+        public array $context = [],
+	public ?\DateTimeInterface $performedAt = null  
+	) {
+		$this->performedAt = $performedAt ?? now();
+	}
 }

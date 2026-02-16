@@ -2,8 +2,9 @@
 
 namespace Adichan\WorkflowEngine\Traits;
 
-use Adichan\WorkflowEngine\States\StateMachine;
 use Adichan\WorkflowEngine\Models\WorkflowApproval;
+use Adichan\WorkflowEngine\Models\WorkflowTransition;
+use Adichan\WorkflowEngine\States\StateMachine;
 
 trait HasWorkflow
 {
@@ -13,18 +14,18 @@ trait HasWorkflow
 
     public function workflow(): StateMachine
     {
-        if (!$this->workflow) {
+        if (! $this->workflow) {
             $workflowName = $this->getWorkflowName();
 
             // Get config from the correct location
             $workflows = config('workflow.workflows', []);
             $definition = $workflows[$workflowName] ?? null;
 
-            if (!$definition) {
+            if (! $definition) {
                 // Fallback to old config path for backward compatibility
                 $definition = config("workflow.{$workflowName}");
 
-                if (!$definition) {
+                if (! $definition) {
                     throw new \RuntimeException("Workflow '{$workflowName}' not defined. Check your workflow configuration.");
                 }
             }
@@ -38,7 +39,7 @@ trait HasWorkflow
     public function getWorkflowName(): string
     {
         // Check if property exists and is set
-        if (property_exists($this, 'workflowName') && !empty($this->workflowName)) {
+        if (property_exists($this, 'workflowName') && ! empty($this->workflowName)) {
             return $this->workflowName;
         }
 
@@ -142,9 +143,9 @@ trait HasWorkflow
     public function getApprovalHistory(): array
     {
         return WorkflowApproval::whereHas('transition', function ($query) {
-                $query->where('model_type', get_class($this))
-                      ->where('model_id', $this->id);
-            })
+            $query->where('model_type', get_class($this))
+                ->where('model_id', $this->id);
+        })
             ->with('approver')
             ->orderBy('created_at', 'asc')
             ->get()
@@ -166,6 +167,16 @@ trait HasWorkflow
         $transitions = $this->workflow()->getAvailableTransitions($this);
 
         // Return first available transition if not specified
-        return !empty($transitions) ? array_key_first($transitions) : null;
+        return ! empty($transitions) ? array_key_first($transitions) : null;
+    }
+
+    public function getLastTransitionTime(): ?\DateTimeInterface
+    {
+        $lastTransition = WorkflowTransition::where('model_type', get_class($this))
+            ->where('model_id', $this->id)
+            ->orderBy('performed_at', 'desc')
+            ->first();
+
+        return $lastTransition?->performed_at;
     }
 }

@@ -18,6 +18,7 @@ return new class extends Migration
             $table->string('to_state');
             $table->json('context')->nullable();
             $table->unsignedBigInteger('performed_by')->nullable();
+            $table->timestamp('performed_at')->nullable(); 
             $table->json('metadata')->nullable();
             $table->timestamps();
             

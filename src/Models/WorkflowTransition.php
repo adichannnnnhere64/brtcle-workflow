@@ -19,6 +19,7 @@ class WorkflowTransition extends Model implements WorkflowTransitionInterface
         'to_state',
         'context',
         'performed_by',
+        'performed_at',           
         'metadata',
     ];
 
