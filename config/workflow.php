@@ -35,30 +35,106 @@ return [
                     'from' => 'draft',
                     'to' => 'under_review',
                     'guard' => 'workflow.can_submit',
+                    // Example: optional supporting documents
+                    'requirements' => [
+                        [
+                            'key' => 'attachments',
+                            'type' => 'files',
+                            'label' => 'Supporting Documents',
+                            'required' => false,
+                            'config' => [
+                                'max_files' => 5,
+                                'max_size' => 10240, // 10MB
+                                'mimes' => ['pdf', 'jpg', 'png', 'doc', 'docx'],
+                            ],
+                        ],
+                    ],
                 ],
                 [
                     'name' => 'approve',
                     'from' => 'under_review',
                     'to' => 'approved',
                     'guard' => 'workflow.can_approve',
+                    // Example: optional approval comment
+                    'requirements' => [
+                        [
+                            'key' => 'comment',
+                            'type' => 'message',
+                            'label' => 'Approval Comment',
+                            'required' => false,
+                            'config' => [
+                                'placeholder' => 'Add an optional comment...',
+                                'max_length' => 500,
+                            ],
+                        ],
+                    ],
                 ],
                 [
                     'name' => 'reject',
                     'from' => 'under_review',
                     'to' => 'rejected',
                     'guard' => 'workflow.can_reject',
+                    // Example: required rejection reason
+                    'requirements' => [
+                        [
+                            'key' => 'reason',
+                            'type' => 'message',
+                            'label' => 'Rejection Reason',
+                            'required' => true,
+                            'config' => [
+                                'placeholder' => 'Please provide a reason for rejection...',
+                                'min_length' => 10,
+                                'max_length' => 1000,
+                            ],
+                        ],
+                    ],
                 ],
                 [
                     'name' => 'request_revision',
                     'from' => 'under_review',
                     'to' => 'draft',
                     'guard' => 'workflow.can_request_revision',
+                    // Example: required revision notes
+                    'requirements' => [
+                        [
+                            'key' => 'revision_notes',
+                            'type' => 'message',
+                            'label' => 'Revision Notes',
+                            'required' => true,
+                            'config' => [
+                                'placeholder' => 'Describe what needs to be revised...',
+                                'min_length' => 20,
+                            ],
+                        ],
+                    ],
                 ],
                 [
                     'name' => 'process_payment',
                     'from' => 'approved',
                     'to' => 'completed',
                     'guard' => 'workflow.can_process_payment',
+                    // Example: required payment proof
+                    'requirements' => [
+                        [
+                            'key' => 'payment_reference',
+                            'type' => 'message',
+                            'label' => 'Payment Reference Number',
+                            'required' => true,
+                            'config' => [
+                                'placeholder' => 'Enter payment reference...',
+                            ],
+                        ],
+                        [
+                            'key' => 'payment_proof',
+                            'type' => 'file',
+                            'label' => 'Payment Proof',
+                            'required' => true,
+                            'config' => [
+                                'max_size' => 5120, // 5MB
+                                'mimes' => ['pdf', 'jpg', 'png'],
+                            ],
+                        ],
+                    ],
                 ],
             ],
         ],

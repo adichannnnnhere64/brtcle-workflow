@@ -93,14 +93,42 @@ trait HasWorkflow
         return $this->workflow()->getAvailableTransitions($this);
     }
 
-    public function canTransition(string $transition, array $context = []): bool
+    public function canTransition(string $transition, array $context = [], bool $validateRequirements = false): bool
     {
-        return $this->workflow()->can($this, $transition, $context);
+        return $this->workflow()->can($this, $transition, $context, $validateRequirements);
     }
 
     public function transition(string $transition, array $context = [])
     {
         return $this->workflow()->apply($this, $transition, $context);
+    }
+
+    /**
+     * Get requirements for a specific transition
+     *
+     * @return array<array>
+     */
+    public function getTransitionRequirements(string $transition): array
+    {
+        return $this->workflow()->getTransitionRequirements($transition);
+    }
+
+    /**
+     * Validate context against transition requirements
+     *
+     * @return array{valid: bool, errors: array<string, array<string>>}
+     */
+    public function validateTransitionRequirements(string $transition, array $context): array
+    {
+        return $this->workflow()->validateRequirements($transition, $context);
+    }
+
+    /**
+     * Check if a transition has any requirements
+     */
+    public function transitionHasRequirements(string $transition): bool
+    {
+        return $this->workflow()->hasRequirements($transition);
     }
 
     public function transitionHistory()

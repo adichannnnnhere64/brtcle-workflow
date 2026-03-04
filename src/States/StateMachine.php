@@ -8,8 +8,10 @@ use Adichan\WorkflowEngine\Contracts\WorkflowInterface;
 use Adichan\WorkflowEngine\Contracts\WorkflowTransitionInterface;
 use Adichan\WorkflowEngine\Enums\WorkflowGuard;
 use Adichan\WorkflowEngine\Events\WorkflowTransitioned;
+use Adichan\WorkflowEngine\Exceptions\RequirementValidationException;
 use Adichan\WorkflowEngine\Models\WorkflowApproval;
 use Adichan\WorkflowEngine\Models\WorkflowTransition;
+use Adichan\WorkflowEngine\Requirements\RequirementValidator;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -71,6 +73,52 @@ class StateMachine implements WorkflowInterface
         }
     }
 
+    /**
+     * Get requirements configuration for a specific transition
+     *
+     * @return array<array>
+     */
+    public function getTransitionRequirements(string $transitionName): array
+    {
+        foreach ($this->definition['transitions'] as $transition) {
+            if ($transition['name'] === $transitionName) {
+                return $transition['requirements'] ?? [];
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Get a RequirementValidator for a specific transition
+     */
+    public function getRequirementValidator(string $transitionName): RequirementValidator
+    {
+        $requirements = $this->getTransitionRequirements($transitionName);
+
+        return RequirementValidator::fromConfig($requirements);
+    }
+
+    /**
+     * Validate context against transition requirements
+     *
+     * @return array{valid: bool, errors: array<string, array<string>>}
+     */
+    public function validateRequirements(string $transitionName, array $context): array
+    {
+        $validator = $this->getRequirementValidator($transitionName);
+
+        return $validator->validate($context);
+    }
+
+    /**
+     * Check if transition has any requirements
+     */
+    public function hasRequirements(string $transitionName): bool
+    {
+        return ! empty($this->getTransitionRequirements($transitionName));
+    }
+
     public function getAvailableTransitions(Model $model): array
     {
         $stateColumn = $this->definition['state_column'] ?? 'status';
@@ -85,9 +133,15 @@ class StateMachine implements WorkflowInterface
 
         foreach ($currentState->allowedTransitions() as $transitionName => $config) {
             if ($this->can($model, $transitionName)) {
+                $requirements = $this->getTransitionRequirements($transitionName);
+                $validator = RequirementValidator::fromConfig($requirements);
+
                 $available[$transitionName] = [
                     'to' => $config['to'],
                     'guard' => $config['guard'],
+                    'requirements' => $validator->toArray(),
+                    'has_requirements' => $validator->hasRequirements(),
+                    'has_required' => $validator->hasRequired(),
                 ];
             }
         }
@@ -104,6 +158,12 @@ class StateMachine implements WorkflowInterface
             throw new \DomainException(
                 "Transition '{$transition}' is not allowed from current state"
             );
+        }
+
+        // Validate requirements before applying
+        if ($this->hasRequirements($transition)) {
+            $validator = $this->getRequirementValidator($transition);
+            $validator->validateOrFail($context);
         }
 
         $stateColumn = $this->definition['state_column'] ?? 'status';
@@ -167,7 +227,8 @@ class StateMachine implements WorkflowInterface
     public function can(
         Model $model,
         string $transition,
-        array $context = []
+        array $context = [],
+        bool $validateRequirements = false
     ): bool {
         $stateColumn = $this->definition['state_column'] ?? 'status';
         $currentState = $model->{$stateColumn};
@@ -214,6 +275,14 @@ class StateMachine implements WorkflowInterface
                 } catch (\Exception $e) {
                     return false;
                 }
+            }
+        }
+
+        // Optionally validate requirements
+        if ($validateRequirements && $this->hasRequirements($transition)) {
+            $validation = $this->validateRequirements($transition, $context);
+            if (! $validation['valid']) {
+                return false;
             }
         }
 
