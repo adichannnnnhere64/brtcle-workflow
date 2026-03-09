@@ -10,6 +10,7 @@ use Adichan\WorkflowEngine\Enums\WorkflowGuard;
 use Adichan\WorkflowEngine\Events\WorkflowTransitioned;
 use Adichan\WorkflowEngine\Exceptions\RequirementValidationException;
 use Adichan\WorkflowEngine\Models\WorkflowApproval;
+use Adichan\WorkflowEngine\Models\WorkflowSignoff;
 use Adichan\WorkflowEngine\Models\WorkflowTransition;
 use Adichan\WorkflowEngine\Requirements\RequirementValidator;
 use Illuminate\Database\Eloquent\Model;
@@ -67,7 +68,7 @@ class StateMachine implements WorkflowInterface
             $fromState->addTransition(
                 $transition['to'],
                 $transition['name'],
-                WorkflowGuard::from($transition['guard']),
+                WorkflowGuard::tryFrom($transition['guard']) ?? $transition['guard'],
                 $transition['validator'] ?? null
             );
         }
@@ -836,5 +837,182 @@ class StateMachine implements WorkflowInterface
                 ->orderBy('count', 'desc')
                 ->first(),
         ];
+    }
+
+    // ==========================================
+    // Signoff Methods
+    // ==========================================
+
+    /**
+     * Record a signoff on a model.
+     */
+    public function recordSignoff(
+        Model $model,
+        int $userId,
+        string $signoffType,
+        ?string $comments = null,
+        array $metadata = []
+    ): WorkflowSignoff {
+        return WorkflowSignoff::recordSignoff(
+            $model,
+            $userId,
+            $signoffType,
+            $this->workflowName,
+            $comments,
+            $metadata
+        );
+    }
+
+    /**
+     * Check if a user has signed off on a model.
+     */
+    public function hasSignoff(Model $model, int $userId, string $signoffType): bool
+    {
+        return WorkflowSignoff::hasSignedOff(
+            $model,
+            $userId,
+            $signoffType,
+            $this->workflowName
+        );
+    }
+
+    /**
+     * Get all signoffs for a model of a specific type.
+     */
+    public function getSignoffs(Model $model, string $signoffType)
+    {
+        return WorkflowSignoff::getSignoffs(
+            $model,
+            $signoffType,
+            $this->workflowName
+        );
+    }
+
+    /**
+     * Get user IDs who have signed off.
+     */
+    public function getSignoffUserIds(Model $model, string $signoffType): array
+    {
+        return WorkflowSignoff::getSignoffUserIds(
+            $model,
+            $signoffType,
+            $this->workflowName
+        );
+    }
+
+    /**
+     * Check if all required signoffs are present.
+     *
+     * @param Model $model The model to check
+     * @param string $signoffType The type of signoff (e.g., 'approver', 'releaser')
+     * @param array $requiredUserIds User IDs that must have signed off
+     * @return bool
+     */
+    public function hasAllRequiredSignoffs(
+        Model $model,
+        string $signoffType,
+        array $requiredUserIds
+    ): bool {
+        if (empty($requiredUserIds)) {
+            return true;
+        }
+
+        $signedUserIds = $this->getSignoffUserIds($model, $signoffType);
+
+        foreach ($requiredUserIds as $userId) {
+            if (!in_array($userId, $signedUserIds)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Get missing required signoffs.
+     *
+     * @param Model $model The model to check
+     * @param string $signoffType The type of signoff
+     * @param array $requiredUserIds User IDs that must have signed off
+     * @return array User IDs that haven't signed off yet
+     */
+    public function getMissingSignoffs(
+        Model $model,
+        string $signoffType,
+        array $requiredUserIds
+    ): array {
+        if (empty($requiredUserIds)) {
+            return [];
+        }
+
+        $signedUserIds = $this->getSignoffUserIds($model, $signoffType);
+
+        return array_values(array_diff($requiredUserIds, $signedUserIds));
+    }
+
+    /**
+     * Remove a signoff.
+     */
+    public function removeSignoff(Model $model, int $userId, string $signoffType): bool
+    {
+        return WorkflowSignoff::removeSignoff(
+            $model,
+            $userId,
+            $signoffType,
+            $this->workflowName
+        );
+    }
+
+    /**
+     * Clear all signoffs of a specific type.
+     */
+    public function clearSignoffs(Model $model, string $signoffType): int
+    {
+        return WorkflowSignoff::clearSignoffs(
+            $model,
+            $signoffType,
+            $this->workflowName
+        );
+    }
+
+    /**
+     * Validate that required signoffs are present before a transition.
+     *
+     * @param Model $model The model being transitioned
+     * @param string $transition The transition name
+     * @param string $signoffType The signoff type to validate
+     * @param array $requiredUserIds User IDs that must have signed off
+     * @throws \DomainException If required signoffs are missing
+     */
+    public function validateSignoffsForTransition(
+        Model $model,
+        string $transition,
+        string $signoffType,
+        array $requiredUserIds
+    ): void {
+        $missingSignoffs = $this->getMissingSignoffs($model, $signoffType, $requiredUserIds);
+
+        if (!empty($missingSignoffs)) {
+            $count = count($missingSignoffs);
+            throw new \DomainException(
+                "Cannot perform '{$transition}' transition. Missing {$count} required {$signoffType} signoff(s)."
+            );
+        }
+    }
+
+    /**
+     * Check if a transition can proceed based on signoff requirements.
+     *
+     * @param Model $model The model being transitioned
+     * @param string $signoffType The signoff type to validate
+     * @param array $requiredUserIds User IDs that must have signed off
+     * @return bool
+     */
+    public function canProceedWithSignoffs(
+        Model $model,
+        string $signoffType,
+        array $requiredUserIds
+    ): bool {
+        return $this->hasAllRequiredSignoffs($model, $signoffType, $requiredUserIds);
     }
 }

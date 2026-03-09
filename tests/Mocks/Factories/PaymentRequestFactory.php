@@ -4,6 +4,7 @@ namespace Adichan\WorkflowEngine\Tests\Mocks\Factories;
 
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Adichan\WorkflowEngine\Tests\Mocks\Models\PaymentRequest;
+use Illuminate\Support\Str;
 
 class PaymentRequestFactory extends Factory
 {
@@ -13,9 +14,9 @@ class PaymentRequestFactory extends Factory
     {
         return [
             'user_id' => fn() => UserFactory::new()->create()->id,
-            'title' => $this->faker->sentence(),
-            'description' => $this->faker->paragraph(),
-            'amount' => $this->faker->randomFloat(2, 100, 10000),
+            'title' => 'Payment Request '.Str::uuid()->toString(),
+            'description' => 'Test payment request',
+            'amount' => 1000.00,
             'status' => 'draft',
             'attachments' => [],
             'payment_due_date' => now()->addDays(30),

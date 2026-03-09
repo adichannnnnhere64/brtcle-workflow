@@ -31,7 +31,10 @@ test('complete payment request workflow', function () {
     
     // Submit with attachments
     $transition = $request->transition('submit', [
-        'attachments' => ['invoice.pdf', 'receipt.jpg'],
+        'attachments' => [
+            ['name' => 'invoice.pdf', 'size' => 1024],
+            ['name' => 'receipt.jpg', 'size' => 512],
+        ],
         'metadata' => ['submitted_at' => now()],
     ]);
     
@@ -42,19 +45,21 @@ test('complete payment request workflow', function () {
     $request->refresh();
     
     $transition = $request->transition('request_revision', [
-        'remarks' => 'Please provide proper invoice',
+        'revision_notes' => 'Please provide a clearer invoice and receipt details.',
         'metadata' => ['requested_by' => $this->reviewer->id],
     ]);
-    
+
     expect($request->refresh()->status)->toBe('draft')
-        ->and($transition->getContext())->toHaveKey('remarks');
+        ->and($transition->getContext())->toHaveKey('revision_notes');
     
     // Step 1 (again): Employee resubmits
     $this->actingAs($this->employee);
     $request->refresh();
     
     $request->transition('submit', [
-        'attachments' => ['correct_invoice.pdf'],
+        'attachments' => [
+            ['name' => 'correct_invoice.pdf', 'size' => 2048],
+        ],
         'remarks' => 'Updated invoice attached',
     ]);
     
@@ -73,7 +78,8 @@ test('complete payment request workflow', function () {
     $request->refresh();
     
     $request->transition('process_payment', [
-        'payment_proof' => 'payment_receipt.pdf',
+        'payment_reference' => 'PAY-2024-0001',
+        'payment_proof' => ['name' => 'payment_receipt.pdf', 'size' => 1024],
         'processed_at' => now(),
         'metadata' => ['payment_method' => 'bank_transfer'],
     ]);
@@ -104,7 +110,11 @@ test('workflow prevents illegal transitions', function () {
     expect($request->canTransition('approve'))->toBeFalse();
     
     // Submit first
-    $request->transition('submit', ['attachments' => ['file.pdf']]);
+    $request->transition('submit', [
+        'attachments' => [
+            ['name' => 'file.pdf', 'size' => 1024],
+        ],
+    ]);
     
     // Cannot submit again (already under review)
     expect($request->canTransition('submit'))->toBeFalse();
